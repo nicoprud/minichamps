@@ -1072,10 +1072,54 @@ async function loadRealAlumnosFamilias(){
   ]);
   if(famErr) console.error('Error cargando familias:', famErr.message);
   if(stuErr) console.error('Error cargando alumnos:', stuErr.message);
-  const realFamilies = (famRows||[]).map(mapFamilyRow);
-  const realStudents = (stuRows||[]).map(mapStudentRow);
-  mockData.families = [...mockData.families, ...realFamilies];
-  mockData.students = [...mockData.students, ...realStudents];
+  const newFamilies = (famRows||[]).map(mapFamilyRow);
+  const newStudents = (stuRows||[]).map(mapStudentRow);
+  mockData.families = [...mockData.families, ...newFamilies];
+  mockData.students = [...mockData.students, ...newStudents];
+}
+
+/* ---- Identificar registros reales (uuid de Supabase) vs. los de prueba
+   (ids cortos tipo 'F001','L001','I002') dentro de las listas combinadas de
+   mockData. Se usa en los formularios de creación (Nuevo alumno, Nuevo
+   grupo, etc.) para que los selectores solo ofrezcan registros reales como
+   opción — asignar un id de prueba a una fila real rompería el insert. ---- */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isRealId(id){ return typeof id === 'string' && UUID_RE.test(id); }
+function realFamilyRecords(){ return mockData.families.filter(f=>isRealId(f.id)); }
+function realLocationRecords(){ return mockData.locations.filter(l=>isRealId(l.id)); }
+function realInstructorRecords(){ return mockData.instructors.filter(i=>isRealId(i.id)); }
+
+/* ---- Locaciones / Instructores / Grupos: mismo patrón aditivo que
+   familias/alumnos (los datos reales se suman a los de prueba). ---- */
+function mapLocationRow(row){
+  return { id: row.id, name: row.name, address: row.address || '', maps: row.maps_url || '#', desc: row.description || '', active: !!row.active };
+}
+function mapInstructorRow(row){
+  return { id: row.id, name: row.name, role: row.role || 'Instructor', phone: row.phone || '', color: row.color || '#ff6a00', active: !!row.active, ratePerClass: row.rate_per_class || 0 };
+}
+function hhmm(t){ return t ? String(t).slice(0,5) : ''; }
+function mapGroupRow(row){
+  return {
+    id: row.id, name: row.name, level: row.level || 'Básico',
+    ageMin: row.age_min, ageMax: row.age_max, day: row.day || '',
+    time: hhmm(row.start_time), duration: row.duration_minutes || 60,
+    instructorIds: (row.group_instructors||[]).map(gi=>gi.instructor_id),
+    locationId: row.location_id, capacity: row.capacity, tariff: row.tariff,
+    transferPlan: row.transfer_plan || 'Sin traslado', active: !!row.active,
+  };
+}
+async function loadRealOperacion(){
+  const [{ data: locRows, error: locErr }, { data: insRows, error: insErr }, { data: grpRows, error: grpErr }] = await Promise.all([
+    sb.from('locations').select('*'),
+    sb.from('instructors').select('*'),
+    sb.from('groups').select('*, group_instructors(instructor_id)'),
+  ]);
+  if(locErr) console.error('Error cargando locaciones:', locErr.message);
+  if(insErr) console.error('Error cargando instructores:', insErr.message);
+  if(grpErr) console.error('Error cargando grupos:', grpErr.message);
+  mockData.locations = [...mockData.locations, ...(locRows||[]).map(mapLocationRow)];
+  mockData.instructors = [...mockData.instructors, ...(insRows||[]).map(mapInstructorRow)];
+  mockData.groups = [...mockData.groups, ...(grpRows||[]).map(mapGroupRow)];
 }
 
 /* Toma el perfil (role / account_type / family_id / instructor_id) ya
@@ -1088,7 +1132,7 @@ async function enterAppFromProfile(profile, authUser){
   state.instructorId = profile.instructor_id || null;
   state.userName = profile.full_name || authUser.email;
 
-  await loadRealAlumnosFamilias();
+  await Promise.all([loadRealAlumnosFamilias(), loadRealOperacion()]);
 
   if(state.role==='apoderado') state.apoderadoActiveChildId = studentsOfFamily(state.apoderadoFamilyId)[0]?.id || null;
   if(state.role==='instructor') state.calendarFilters.instructor = state.instructorId;
@@ -1989,9 +2033,10 @@ function handleStudentPhotoUpload(studentId, input){
   reader.readAsDataURL(file);
 }
 function openNewStudentModal(){
-  if(!mockData.families.length){ toast('Primero crea una familia para poder asignarle un alumno.'); return; }
+  const families = realFamilyRecords();
+  if(!families.length){ toast('Primero crea una familia real para poder asignarle un alumno.'); return; }
   const body = `
-    <div class="form-group"><label class="form-label">Familia</label><select class="form-select" id="ns-family">${mockData.families.map(f=>`<option value="${f.id}">${f.apoderado}</option>`).join('')}</select></div>
+    <div class="form-group"><label class="form-label">Familia</label><select class="form-select" id="ns-family">${families.map(f=>`<option value="${f.id}">${f.apoderado}</option>`).join('')}</select></div>
     <div class="form-group"><label class="form-label">Nombre del alumno</label><input class="form-input" id="ns-name" placeholder="Nombre y apellido"></div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Fecha de nacimiento</label><input class="form-input" type="date" id="ns-birth" value="2017-01-01"></div>
@@ -2422,17 +2467,32 @@ function getSelectedInstructorIds(containerId){
   const ids = [...document.querySelectorAll('#'+containerId+' .chip-option.selected')].map(b=>b.dataset.instructorId);
   return ids.length ? ids : [mockData.instructors[0].id];
 }
+/* Variantes "solo reales" para los formularios que escriben grupos en
+   Supabase (Nuevo grupo / Editar grupo) — evitan ofrecer instructores de
+   prueba, cuyo id no es un uuid válido para la base de datos. */
+function instructorChipPickerReal(containerId, selectedIds){
+  const real = realInstructorRecords();
+  return `<div class="form-radio-group" id="${containerId}">
+    ${real.map(i=>`<button type="button" class="chip-option ${selectedIds.includes(i.id)?'selected':''}" data-instructor-id="${i.id}" onclick="this.classList.toggle('selected')">${i.name}</button>`).join('') || '<span class="cell-muted">Aún no hay instructores reales creados.</span>'}
+  </div>`;
+}
+function getSelectedInstructorIdsReal(containerId){
+  const ids = [...document.querySelectorAll('#'+containerId+' .chip-option.selected')].map(b=>b.dataset.instructorId);
+  return ids;
+}
 
 function openEditGroupModal(groupId){
   const g = getGroup(groupId);
+  if(!isRealId(groupId)){ toast('Este grupo es de demostración y no está conectado a la base de datos real.'); return; }
+  const locations = realLocationRecords();
   const body = `
     <div class="form-group"><label class="form-label">Nombre del grupo</label><input class="form-input" id="eg-name" value="${g.name}"></div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Cupo máximo</label><input class="form-input" type="number" min="${studentsOfGroup(g.id).length}" id="eg-cap" value="${g.capacity}"></div>
       <div class="form-group"><label class="form-label">Tarifa mensual</label><input class="form-input" type="number" step="1000" id="eg-tariff" value="${g.tariff}"></div>
     </div>
-    <div class="form-group"><label class="form-label">Instructores a cargo (puede ser más de uno)</label>${instructorChipPicker('eg-instructors', g.instructorIds||[])}</div>
-    <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="eg-location">${mockData.locations.map(l=>`<option value="${l.id}" ${l.id===g.locationId?'selected':''}>${l.name}</option>`).join('')}</select></div>
+    <div class="form-group"><label class="form-label">Instructores a cargo (puede ser más de uno)</label>${instructorChipPickerReal('eg-instructors', g.instructorIds||[])}</div>
+    <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="eg-location"><option value="">— Sin asignar —</option>${locations.map(l=>`<option value="${l.id}" ${l.id===g.locationId?'selected':''}>${l.name}</option>`).join('')}</select></div>
     <div class="form-group"><label class="form-label">Estado</label>
       <div class="form-radio-group">
         <button type="button" class="chip-option ${g.active?'selected':''}" id="eg-active-yes" onclick="document.getElementById('eg-active-yes').classList.add('selected');document.getElementById('eg-active-no').classList.remove('selected');">Activo</button>
@@ -2445,22 +2505,34 @@ function openEditGroupModal(groupId){
   openModal({title:'Editar grupo', sub:g.name, bodyHtml:body, footHtml:foot});
 }
 
-function confirmEditGroup(groupId){
+async function confirmEditGroup(groupId){
   const g = getGroup(groupId);
   const minCap = studentsOfGroup(groupId).length;
   const newCap = Math.max(minCap, parseInt(document.getElementById('eg-cap').value)||g.capacity);
-  g.name = document.getElementById('eg-name').value.trim() || g.name;
-  g.capacity = newCap;
-  g.tariff = parseInt(document.getElementById('eg-tariff').value)||g.tariff;
-  g.instructorIds = getSelectedInstructorIds('eg-instructors');
-  g.locationId = document.getElementById('eg-location').value;
-  g.active = document.getElementById('eg-active-yes').classList.contains('selected');
+  const instructorIds = getSelectedInstructorIdsReal('eg-instructors');
+  const payload = {
+    name: document.getElementById('eg-name').value.trim() || g.name,
+    capacity: newCap,
+    tariff: parseInt(document.getElementById('eg-tariff').value)||g.tariff,
+    location_id: document.getElementById('eg-location').value || null,
+    active: document.getElementById('eg-active-yes').classList.contains('selected'),
+  };
+  const { error } = await sb.from('groups').update(payload).eq('id', groupId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  await sb.from('group_instructors').delete().eq('group_id', groupId);
+  if(instructorIds.length){
+    const { error: linkErr } = await sb.from('group_instructors').insert(instructorIds.map(iid=>({group_id: groupId, instructor_id: iid})));
+    if(linkErr) console.error('Error asignando instructores:', linkErr.message);
+  }
+  g.name = payload.name; g.capacity = payload.capacity; g.tariff = payload.tariff;
+  g.locationId = payload.location_id; g.active = payload.active; g.instructorIds = instructorIds;
   closeModal();
   toast('Grupo actualizado.');
   renderView(state.view);
 }
 
 function openCreateGroupModal(){
+  const locations = realLocationRecords();
   const body = `
     <div class="form-group"><label class="form-label">Nombre del grupo</label><input class="form-input" id="ng-name" placeholder="Ej: Básico 11–13"></div>
     <div class="form-row">
@@ -2475,30 +2547,38 @@ function openCreateGroupModal(){
       <div class="form-group"><label class="form-label">Día</label><select class="form-select" id="ng-day"><option>Lunes</option><option>Martes</option><option>Miércoles</option><option>Jueves</option><option>Viernes</option><option>Sábado</option><option>Domingo</option></select></div>
       <div class="form-group"><label class="form-label">Hora</label><input class="form-input" type="time" id="ng-time" value="17:00"></div>
     </div>
-    <div class="form-group"><label class="form-label">Instructores a cargo (puede ser más de uno)</label>${instructorChipPicker('ng-instructors', [mockData.instructors[0].id])}</div>
-    <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="ng-location">${mockData.locations.map(l=>`<option value="${l.id}">${l.name}</option>`).join('')}</select></div>
+    <div class="form-group"><label class="form-label">Instructores a cargo (puede ser más de uno)</label>${instructorChipPickerReal('ng-instructors', [])}</div>
+    <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="ng-location"><option value="">— Sin asignar —</option>${locations.map(l=>`<option value="${l.id}">${l.name}</option>`).join('')}</select></div>
     <div class="form-group"><label class="form-label">Tarifa mensual</label><input class="form-input" type="number" step="1000" id="ng-tariff" value="90000"></div>
   `;
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmCreateGroup()">Crear grupo</button>`;
   openModal({title:'Nuevo grupo', bodyHtml:body, footHtml:foot});
 }
 
-function confirmCreateGroup(){
-  const id = 'G'+String(mockData.groups.length+1).padStart(3,'0')+Math.random().toString(36).slice(2,4);
-  mockData.groups.push({
-    id, name: document.getElementById('ng-name').value.trim() || 'Nuevo grupo',
+async function confirmCreateGroup(){
+  const instructorIds = getSelectedInstructorIdsReal('ng-instructors');
+  const payload = {
+    name: document.getElementById('ng-name').value.trim() || 'Nuevo grupo',
     level: document.getElementById('ng-level').value,
-    ageMin: parseInt(document.getElementById('ng-agemin').value)||6,
-    ageMax: parseInt(document.getElementById('ng-agemax').value)||18,
+    age_min: parseInt(document.getElementById('ng-agemin').value)||6,
+    age_max: parseInt(document.getElementById('ng-agemax').value)||18,
     day: document.getElementById('ng-day').value,
-    time: document.getElementById('ng-time').value,
-    duration:60,
-    instructorIds: getSelectedInstructorIds('ng-instructors'),
-    locationId: document.getElementById('ng-location').value,
+    start_time: document.getElementById('ng-time').value,
+    duration_minutes: 60,
+    location_id: document.getElementById('ng-location').value || null,
     capacity: parseInt(document.getElementById('ng-cap').value)||6,
     tariff: parseInt(document.getElementById('ng-tariff').value)||90000,
-    transferPlan:'Sin traslado', active:true,
-  });
+    transfer_plan: 'Sin traslado', active: true,
+  };
+  const { data, error } = await sb.from('groups').insert(payload).select().single();
+  if(error){ toast('No se pudo crear: ' + error.message); return; }
+  if(instructorIds.length){
+    const { error: linkErr } = await sb.from('group_instructors').insert(instructorIds.map(iid=>({group_id: data.id, instructor_id: iid})));
+    if(linkErr) console.error('Error asignando instructores:', linkErr.message);
+  }
+  const mapped = mapGroupRow(data);
+  mapped.instructorIds = instructorIds;
+  mockData.groups.push(mapped);
   closeModal();
   toast('Grupo creado correctamente.');
   renderView(state.view);
@@ -2511,7 +2591,7 @@ function renderLocaciones(){
   return `
   <div class="page-head">
     <div><h1>Locaciones</h1><div class="page-sub">${mockData.locations.length} lugares configurados</div></div>
-    <button class="btn btn-primary" onclick="toast('La creación de locaciones se habilita al conectar la app a Supabase.')">+ Nueva locación</button>
+    <button class="btn btn-primary" onclick="openNewLocationModal()">+ Nueva locación</button>
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
     ${mockData.locations.map(l=>{
@@ -2524,10 +2604,71 @@ function renderLocaciones(){
         <div class="cell-muted" style="margin:8px 0;">${l.address}</div>
         <div style="font-size:12.5px;color:var(--text-1);margin-bottom:10px;">${l.desc}</div>
         <div class="cell-muted" style="margin-bottom:10px;">🚵 ${groupsHere.length} grupo(s) asignado(s): ${groupsHere.map(g=>g.name).join(', ')||'—'}</div>
-        <a href="${l.maps}" target="_blank" class="btn btn-secondary btn-sm">📍 Ver en Google Maps</a>
+        <div style="display:flex;gap:8px;">
+          <a href="${l.maps}" target="_blank" class="btn btn-secondary btn-sm" style="flex:1;">📍 Ver en Maps</a>
+          ${isRealId(l.id) ? `<button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openEditLocationModal('${l.id}')">✏️ Editar</button>` : ''}
+        </div>
       </div>`;
     }).join('')}
   </div>`;
+}
+
+function openNewLocationModal(){
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre</label><input class="form-input" id="nl-name" placeholder="Ej: Parque Los Aromos"></div>
+    <div class="form-group"><label class="form-label">Dirección</label><input class="form-input" id="nl-address"></div>
+    <div class="form-group"><label class="form-label">Link de Google Maps</label><input class="form-input" id="nl-maps" placeholder="https://maps.google.com/..."></div>
+    <div class="form-group"><label class="form-label">Descripción</label><input class="form-input" id="nl-desc" placeholder="Ej: Circuito de tierra, ideal para nivel básico."></div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmNewLocation()">Crear locación</button>`;
+  openModal({title:'Nueva locación', bodyHtml:body, footHtml:foot});
+}
+async function confirmNewLocation(){
+  const name = document.getElementById('nl-name').value.trim();
+  if(!name){ toast('Ingresa el nombre de la locación.'); return; }
+  const payload = {
+    name,
+    address: document.getElementById('nl-address').value.trim() || null,
+    maps_url: document.getElementById('nl-maps').value.trim() || null,
+    description: document.getElementById('nl-desc').value.trim() || null,
+    active: true,
+  };
+  const { data, error } = await sb.from('locations').insert(payload).select().single();
+  if(error){ toast('No se pudo crear: ' + error.message); return; }
+  mockData.locations.push(mapLocationRow(data));
+  closeModal();
+  toast(`Locación "${name}" creada.`);
+  renderView(state.view);
+}
+function openEditLocationModal(locationId){
+  const l = getLocation(locationId);
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre</label><input class="form-input" id="el-name" value="${l.name}"></div>
+    <div class="form-group"><label class="form-label">Dirección</label><input class="form-input" id="el-address" value="${l.address}"></div>
+    <div class="form-group"><label class="form-label">Link de Google Maps</label><input class="form-input" id="el-maps" value="${l.maps==='#'?'':l.maps}"></div>
+    <div class="form-group"><label class="form-label">Descripción</label><input class="form-input" id="el-desc" value="${l.desc}"></div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;margin-top:4px;"><input type="checkbox" id="el-active" ${l.active?'checked':''}> Locación activa</label>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmEditLocation('${locationId}')">Guardar cambios</button>`;
+  openModal({title:'Editar locación', sub:l.name, bodyHtml:body, footHtml:foot});
+}
+async function confirmEditLocation(locationId){
+  const l = getLocation(locationId);
+  const name = document.getElementById('el-name').value.trim();
+  if(!name){ toast('El nombre no puede quedar vacío.'); return; }
+  const payload = {
+    name,
+    address: document.getElementById('el-address').value.trim() || null,
+    maps_url: document.getElementById('el-maps').value.trim() || null,
+    description: document.getElementById('el-desc').value.trim() || null,
+    active: document.getElementById('el-active').checked,
+  };
+  const { error } = await sb.from('locations').update(payload).eq('id', locationId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  l.name = payload.name; l.address = payload.address || ''; l.maps = payload.maps_url || '#'; l.desc = payload.description || ''; l.active = payload.active;
+  closeModal();
+  toast('Locación actualizada.');
+  renderView(state.view);
 }
 
 /* ================================================================
@@ -2537,7 +2678,7 @@ function renderInstructores(){
   return `
   <div class="page-head">
     <div><h1>Instructores</h1><div class="page-sub">${mockData.instructors.length} miembros del equipo</div></div>
-    <button class="btn btn-primary" onclick="toast('La gestión de cuentas de instructor se habilita al conectar autenticación real.')">+ Nuevo instructor</button>
+    <button class="btn btn-primary" onclick="openNewInstructorModal()">+ Nuevo instructor</button>
   </div>
   <div class="table-wrap">
     <table><thead><tr><th>Instructor</th><th>Rol</th><th>Teléfono</th><th>Grupos a cargo</th><th>Tarifa/clase</th><th>Por pagar (mes)</th><th>Estado</th></tr></thead><tbody>
@@ -2584,7 +2725,68 @@ function openInstructorModal(instructorId){
       <div class="table-wrap">${sessions.map(s=>sessionRowMini(s)).join('') || '<div class="cell-muted" style="padding:14px;">Sin sesiones registradas.</div>'}</div>
     </div>
   `;
-  openModal({title:i.name, sub:i.role, bodyHtml:body, wide:true});
+  const foot = isRealId(i.id) ? `<button class="btn btn-primary" onclick="openEditInstructorModal('${i.id}')">✏️ Editar instructor</button>` : '';
+  openModal({title:i.name, sub:i.role, bodyHtml:body, footHtml:foot, wide:true});
+}
+
+function openNewInstructorModal(){
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre completo</label><input class="form-input" id="ni-name" placeholder="Ej: Carolina Arrau"></div>
+    <div class="form-group"><label class="form-label">Rol</label><input class="form-input" id="ni-role" placeholder="Ej: Instructora" value="Instructor"></div>
+    <div class="form-group"><label class="form-label">Teléfono</label><input class="form-input" id="ni-phone" placeholder="+56 9 ..."></div>
+    <div class="form-group"><label class="form-label">Tarifa base por clase</label><input class="form-input" type="number" step="1000" id="ni-rate" value="20000"></div>
+    <div class="form-hint">Esto crea la ficha del instructor. Para darle acceso a la app con su propia cuenta, sigue el Paso 5 de la guía de Supabase (crear su usuario y vincular este instructor_id).</div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmNewInstructor()">Crear instructor</button>`;
+  openModal({title:'Nuevo instructor', bodyHtml:body, footHtml:foot});
+}
+async function confirmNewInstructor(){
+  const name = document.getElementById('ni-name').value.trim();
+  if(!name){ toast('Ingresa el nombre del instructor.'); return; }
+  const payload = {
+    name,
+    role: document.getElementById('ni-role').value.trim() || 'Instructor',
+    phone: document.getElementById('ni-phone').value.trim() || null,
+    rate_per_class: parseInt(document.getElementById('ni-rate').value) || 0,
+    color: '#ff6a00', active: true,
+  };
+  const { data, error } = await sb.from('instructors').insert(payload).select().single();
+  if(error){ toast('No se pudo crear: ' + error.message); return; }
+  mockData.instructors.push(mapInstructorRow(data));
+  closeModal();
+  toast(`${name} fue agregado como instructor.`);
+  renderView(state.view);
+}
+function openEditInstructorModal(instructorId){
+  closeModal();
+  const i = getInstructor(instructorId);
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre completo</label><input class="form-input" id="ei-name" value="${i.name}"></div>
+    <div class="form-group"><label class="form-label">Rol</label><input class="form-input" id="ei-role" value="${i.role}"></div>
+    <div class="form-group"><label class="form-label">Teléfono</label><input class="form-input" id="ei-phone" value="${i.phone}"></div>
+    <div class="form-group"><label class="form-label">Tarifa base por clase</label><input class="form-input" type="number" step="1000" id="ei-rate" value="${i.ratePerClass}"></div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;margin-top:4px;"><input type="checkbox" id="ei-active" ${i.active?'checked':''}> Instructor activo</label>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="openInstructorModal('${instructorId}')">Cancelar</button><button class="btn btn-primary" onclick="confirmEditInstructor('${instructorId}')">Guardar cambios</button>`;
+  openModal({title:'Editar instructor', sub:i.name, bodyHtml:body, footHtml:foot});
+}
+async function confirmEditInstructor(instructorId){
+  const i = getInstructor(instructorId);
+  const name = document.getElementById('ei-name').value.trim();
+  if(!name){ toast('El nombre no puede quedar vacío.'); return; }
+  const payload = {
+    name,
+    role: document.getElementById('ei-role').value.trim() || i.role,
+    phone: document.getElementById('ei-phone').value.trim() || null,
+    rate_per_class: parseInt(document.getElementById('ei-rate').value) || 0,
+    active: document.getElementById('ei-active').checked,
+  };
+  const { error } = await sb.from('instructors').update(payload).eq('id', instructorId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  i.name = payload.name; i.role = payload.role; i.phone = payload.phone || ''; i.ratePerClass = payload.rate_per_class; i.active = payload.active;
+  toast('Instructor actualizado.');
+  openInstructorModal(instructorId);
+  renderView(state.view);
 }
 
 
