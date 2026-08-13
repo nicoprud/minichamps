@@ -891,10 +891,16 @@ function recoveryBadge(status){
   const map = {Pendiente:'badge-warning', Agendada:'badge-info', Utilizada:'badge-success'};
   return `<span class="badge ${map[status]||'badge-neutral'}">${status}</span>`;
 }
-function createRecoveryCredit(studentId, reason, originSessionId){
+async function createRecoveryCredit(studentId, reason, originSessionId){
   const exists = mockData.recoveries.some(r=>r.studentId===studentId && r.originSessionId===originSessionId);
   if(exists) return;
-  mockData.recoveries.push({id:'REC'+Math.random().toString(36).slice(2,7), studentId, reason, originSessionId, date:'2026-08-11', status:'Pendiente', assignedSessionId:null});
+  if(isRealId(studentId) && isRealId(originSessionId)){
+    const { data, error } = await sb.from('recoveries').insert({student_id:studentId, reason, origin_session_id:originSessionId, status:'Pendiente'}).select().single();
+    if(error){ console.error('Error creando recuperación:', error.message); return; }
+    mockData.recoveries.push(mapRecoveryRow(data));
+  } else {
+    mockData.recoveries.push({id:'REC'+Math.random().toString(36).slice(2,7), studentId, reason, originSessionId, date:'2026-08-11', status:'Pendiente', assignedSessionId:null});
+  }
 }
 
 /* ================================================================
@@ -1088,6 +1094,7 @@ function isRealId(id){ return typeof id === 'string' && UUID_RE.test(id); }
 function realFamilyRecords(){ return mockData.families.filter(f=>isRealId(f.id)); }
 function realLocationRecords(){ return mockData.locations.filter(l=>isRealId(l.id)); }
 function realInstructorRecords(){ return mockData.instructors.filter(i=>isRealId(i.id)); }
+function realStudentRecords(){ return mockData.students.filter(s=>isRealId(s.id)); }
 
 /* ---- Locaciones / Instructores / Grupos: mismo patrón aditivo que
    familias/alumnos (los datos reales se suman a los de prueba). ---- */
@@ -1122,6 +1129,132 @@ async function loadRealOperacion(){
   mockData.groups = [...mockData.groups, ...(grpRows||[]).map(mapGroupRow)];
 }
 
+/* ---- Sesiones y todo lo operativo que cuelga de ellas: mismo patrón
+   aditivo (real + mock conviven). session_instructors trae su propio
+   "id" de fila (_rowId) porque una sesión puede tener más de un
+   instructor y necesitamos saber cuál actualizar al editar montos o
+   marcar pagos. ---- */
+function mapSessionRow(row){
+  return {
+    id: row.id, groupId: row.group_id, date: row.date,
+    start: hhmm(row.start_time), end: hhmm(row.end_time),
+    locationId: row.location_id, status: row.status, type: row.type,
+    studentIds: (row.session_students||[]).map(x=>x.student_id),
+    instructors: (row.session_instructors||[]).map(x=>({instructorId:x.instructor_id, role:x.role, amount:x.amount, status:x.status, note:x.note||'', _rowId:x.id})),
+    participantsCount: row.participants_count, packId: row.pack_id,
+    studentAmount: row.student_amount, studentPaymentId: row.student_payment_id,
+    suspendReason: row.suspend_reason, recoverable: row.recoverable,
+    isRecoverySession: row.is_recovery_session,
+    recoveryForStudentId: row.recovery_for_student_id, recoveryForSessionId: row.recovery_for_session_id,
+  };
+}
+function mapAttendanceRow(row){ return { id: row.id, sessionId: row.session_id, studentId: row.student_id, status: row.status, note: row.note || '' }; }
+function mapRecoveryRow(row){ return { id: row.id, studentId: row.student_id, reason: row.reason, originSessionId: row.origin_session_id, date: row.date, status: row.status, assignedSessionId: row.assigned_session_id }; }
+function mapBookingRow(row){ return { id: row.id, studentId: row.student_id, sessionId: row.session_id, tipo: row.tipo, status: row.status, createdAt: row.created_at ? row.created_at.slice(0,10) : '' }; }
+function mapPaymentRow(row){ return { id: row.id, familyId: row.family_id, studentId: row.student_id, concept: row.concept, period: row.period, amount: row.amount, date: row.paid_date, method: row.method, status: row.status, receipt: row.receipt }; }
+
+async function loadRealSesiones(){
+  const [
+    { data: sessRows, error: sessErr },
+    { data: attRows, error: attErr },
+    { data: recRows, error: recErr },
+    { data: bookRows, error: bookErr },
+    { data: payRows, error: payErr },
+  ] = await Promise.all([
+    sb.from('sessions').select('*, session_students(student_id), session_instructors(id,instructor_id,role,amount,status,note)'),
+    sb.from('attendance').select('*'),
+    sb.from('recoveries').select('*'),
+    sb.from('bookings').select('*'),
+    sb.from('payments').select('*'),
+  ]);
+  if(sessErr) console.error('Error cargando sesiones:', sessErr.message);
+  if(attErr) console.error('Error cargando asistencia:', attErr.message);
+  if(recErr) console.error('Error cargando recuperaciones:', recErr.message);
+  if(bookErr) console.error('Error cargando reservas:', bookErr.message);
+  if(payErr) console.error('Error cargando pagos:', payErr.message);
+  mockData.sessions = [...mockData.sessions, ...(sessRows||[]).map(mapSessionRow)];
+  mockData.attendance = [...mockData.attendance, ...(attRows||[]).map(mapAttendanceRow)];
+  mockData.recoveries = [...mockData.recoveries, ...(recRows||[]).map(mapRecoveryRow)];
+  mockData.bookings = [...mockData.bookings, ...(bookRows||[]).map(mapBookingRow)];
+  mockData.payments = [...mockData.payments, ...(payRows||[]).map(mapPaymentRow)];
+}
+
+/* ---- Generar próximas sesiones de un grupo real ----
+   Botón manual en la tarjeta del grupo: calcula las próximas N fechas
+   según el día/horario habitual del grupo (usando la fecha real de hoy,
+   no la fecha congelada de la demo) y crea sesiones concretas en el
+   calendario, con los alumnos inscritos y el instructor habitual ya
+   asignados. No duplica fechas que ya tengan sesión generada. */
+const DAY_NAME_TO_NUM = {Domingo:0, Lunes:1, Martes:2, 'Miércoles':3, Jueves:4, Viernes:5, 'Sábado':6};
+function nextGroupOccurrences(dayName, count){
+  const targetDow = DAY_NAME_TO_NUM[dayName];
+  if(targetDow===undefined) return [];
+  const dates = [];
+  let d = new Date();
+  d.setHours(0,0,0,0);
+  while(d.getDay() !== targetDow) d.setDate(d.getDate()+1);
+  for(let i=0;i<count;i++){
+    dates.push(new Date(d));
+    d.setDate(d.getDate()+7);
+  }
+  return dates.map(dt=>`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`);
+}
+function addMinutesToTime(hhmmStr, mins){
+  const [h,m] = hhmmStr.split(':').map(Number);
+  const total = h*60+m+mins;
+  const nh = Math.floor(total/60)%24, nm = total%60;
+  return `${String(nh).padStart(2,'0')}:${String(nm).padStart(2,'0')}`;
+}
+function openGenerateSessionsModal(groupId){
+  const g = getGroup(groupId);
+  const body = `
+    <div class="form-hint" style="margin-bottom:12px;">${g.name} es todos los ${g.day} a las ${g.time}. Esto crea sesiones concretas en el calendario para las próximas semanas (a partir de hoy), con los ${studentsOfGroup(groupId).length} alumno(s) inscritos y ${groupInstructorNames(g)} ya asignados. No se duplican fechas que ya tengan sesión generada.</div>
+    <div class="form-group"><label class="form-label">¿Cuántas semanas generar?</label><input class="form-input" type="number" id="gs-weeks" value="8" min="1" max="26"></div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmGenerateSessions('${groupId}')">Generar sesiones</button>`;
+  openModal({title:'Generar próximas sesiones', sub:g.name, bodyHtml:body, footHtml:foot});
+}
+async function confirmGenerateSessions(groupId){
+  const g = getGroup(groupId);
+  const weeks = Math.max(1, Math.min(26, parseInt(document.getElementById('gs-weeks').value)||8));
+  const dates = nextGroupOccurrences(g.day, weeks);
+  const existingDates = new Set(mockData.sessions.filter(s=>s.groupId===groupId).map(s=>s.date));
+  const toCreate = dates.filter(d=>!existingDates.has(d));
+  if(!toCreate.length){ toast('Ya existen sesiones generadas para esas fechas.'); closeModal(); return; }
+  const endTime = addMinutesToTime(g.time, g.duration||60);
+  const enrolledStudentIds = studentsOfGroup(groupId).filter(s=>isRealId(s.id)).map(s=>s.id);
+  const groupInstructorIds = (g.instructorIds||[]).filter(isRealId);
+  let created = 0;
+  for(const date of toCreate){
+    const { data, error } = await sb.from('sessions').insert({
+      group_id: groupId, date, start_time: g.time, end_time: endTime,
+      location_id: isRealId(g.locationId) ? g.locationId : null,
+      status: 'Programada', type: 'grupal',
+    }).select().single();
+    if(error){ console.error('Error creando sesión:', error.message); continue; }
+    const instructorEntries = [];
+    if(groupInstructorIds.length){
+      const insPayload = groupInstructorIds.map(iid=>{
+        const ins = getInstructor(iid);
+        return { session_id: data.id, instructor_id: iid, role: 'Principal', amount: ins?.ratePerClass || 0, status: 'Pendiente', note: '' };
+      });
+      const { data: insRows } = await sb.from('session_instructors').insert(insPayload).select();
+      (insRows||[]).forEach(r=>instructorEntries.push({instructorId:r.instructor_id, role:r.role, amount:r.amount, status:r.status, note:r.note||'', _rowId:r.id}));
+    }
+    if(enrolledStudentIds.length){
+      await sb.from('session_students').insert(enrolledStudentIds.map(sid=>({session_id: data.id, student_id: sid})));
+    }
+    const mapped = mapSessionRow(data);
+    mapped.instructors = instructorEntries;
+    mapped.studentIds = enrolledStudentIds;
+    mockData.sessions.push(mapped);
+    created++;
+  }
+  closeModal();
+  toast(`${created} sesión(es) generada(s) para ${g.name}.`);
+  renderView(state.view);
+}
+
 /* Toma el perfil (role / account_type / family_id / instructor_id) ya
    resuelto desde Supabase y arranca la app exactamente como antes,
    solo que ahora el rol viene de una cuenta real, no de un botón. */
@@ -1132,7 +1265,7 @@ async function enterAppFromProfile(profile, authUser){
   state.instructorId = profile.instructor_id || null;
   state.userName = profile.full_name || authUser.email;
 
-  await Promise.all([loadRealAlumnosFamilias(), loadRealOperacion()]);
+  await Promise.all([loadRealAlumnosFamilias(), loadRealOperacion(), loadRealSesiones()]);
 
   if(state.role==='apoderado') state.apoderadoActiveChildId = studentsOfFamily(state.apoderadoFamilyId)[0]?.id || null;
   if(state.role==='instructor') state.calendarFilters.instructor = state.instructorId;
@@ -1652,20 +1785,28 @@ function openEditInstructorAmountModal(sessionId, instructorId){
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmEditInstructorAmount('${sessionId}','${instructorId}')">Guardar</button>`;
   openModal({title:'Editar monto a pagar', sub:`${fmtDate(s.date)} · ${s.start}`, bodyHtml:body, footHtml:foot});
 }
-function confirmEditInstructorAmount(sessionId, instructorId){
+async function confirmEditInstructorAmount(sessionId, instructorId){
   const s = getSession(sessionId);
   const entry = sessionInstructorEntries(s).find(e=>e.instructorId===instructorId);
   entry.amount = parseInt(document.getElementById('eia-amount').value) || entry.amount;
   entry.note = document.getElementById('eia-note').value.trim();
+  if(isRealId(sessionId) && entry._rowId){
+    const { error } = await sb.from('session_instructors').update({amount:entry.amount, note:entry.note}).eq('id', entry._rowId);
+    if(error) console.error('Error actualizando monto:', error.message);
+  }
   closeModal();
   toast('Monto actualizado.');
   openSessionModal(sessionId);
 }
 
-function markSessionInstructorPaid(sessionId, instructorId){
+async function markSessionInstructorPaid(sessionId, instructorId){
   const s = getSession(sessionId);
   const entry = sessionInstructorEntries(s).find(e=>e.instructorId===instructorId);
   if(entry) entry.status = 'Pagado';
+  if(isRealId(sessionId) && entry && entry._rowId){
+    const { error } = await sb.from('session_instructors').update({status:'Pagado'}).eq('id', entry._rowId);
+    if(error) console.error('Error marcando pago:', error.message);
+  }
   toast('Pago a instructor registrado.');
 }
 
@@ -1709,11 +1850,12 @@ function selectAddStudentMode(btn){
   btn.classList.add('selected');
   document.getElementById('as-amount-group').style.display = btn.dataset.mode==='extra' ? 'block':'none';
 }
-function confirmAddStudentToSession(sessionId){
+async function confirmAddStudentToSession(sessionId){
   const s = getSession(sessionId);
   const studentId = document.getElementById('as-student').value;
   if(!studentId){ toast('No hay alumno seleccionado.'); return; }
   const mode = document.querySelector('#as-mode .chip-option.selected').dataset.mode;
+  const real = isRealId(sessionId) && isRealId(studentId);
   if(mode==='recovery'){
     const pend = recoveriesOfStudent(studentId).filter(r=>r.status==='Pendiente');
     if(!pend.length){ toast('Este alumno no tiene recuperaciones pendientes.'); return; }
@@ -1721,12 +1863,22 @@ function confirmAddStudentToSession(sessionId){
     rec.status = 'Agendada';
     rec.assignedSessionId = sessionId;
     s.studentIds.push(studentId);
+    if(real){
+      if(isRealId(rec.id)) await sb.from('recoveries').update({status:'Agendada', assigned_session_id:sessionId}).eq('id', rec.id);
+      await sb.from('session_students').insert({session_id:sessionId, student_id:studentId});
+    }
     toast(`${getStudent(studentId).name} se suma usando su recuperación pendiente, sin costo.`);
   } else {
     const amount = parseInt(document.getElementById('as-amount').value) || 15000;
     s.studentIds.push(studentId);
     const fam = getStudent(studentId).familyId;
-    mockData.payments.push({id:'P'+Math.floor(100+Math.random()*800), familyId:fam, studentId, concept:`Clase extra — ${fmtDate(s.date)}`, period:s.date.slice(0,7), amount, date:null, method:null, status:'Pendiente', receipt:null});
+    if(real){
+      await sb.from('session_students').insert({session_id:sessionId, student_id:studentId});
+      const { data, error } = await sb.from('payments').insert({family_id:fam, student_id:studentId, concept:`Clase extra — ${fmtDate(s.date)}`, period:s.date.slice(0,7), amount, status:'Pendiente'}).select().single();
+      if(!error && data) mockData.payments.push(mapPaymentRow(data));
+    } else {
+      mockData.payments.push({id:'P'+Math.floor(100+Math.random()*800), familyId:fam, studentId, concept:`Clase extra — ${fmtDate(s.date)}`, period:s.date.slice(0,7), amount, date:null, method:null, status:'Pendiente', receipt:null});
+    }
     toast(`${getStudent(studentId).name} se suma a la sesión. Se generó un cobro extra de ${fmtMoney(amount)}.`);
   }
   closeModal();
@@ -1765,13 +1917,17 @@ function openSuspendModal(sessionId){
   openModal({title:'Suspender sesión', sub:`${g?g.name:'Clase particular'} · ${fmtDate(s.date)}`, bodyHtml:body, footHtml:foot});
 }
 
-function confirmSuspend(sessionId){
+async function confirmSuspend(sessionId){
   const s = getSession(sessionId);
   const reason = document.getElementById('suspendReason').value;
   const recoverable = document.getElementById('recYes').classList.contains('selected');
   s.status = 'Suspendida';
   s.suspendReason = reason;
   s.recoverable = recoverable;
+  if(isRealId(sessionId)){
+    const { error } = await sb.from('sessions').update({status:'Suspendida', suspend_reason:reason, recoverable}).eq('id', sessionId);
+    if(error) console.error('Error suspendiendo sesión:', error.message);
+  }
   closeModal();
   toast('Sesión suspendida. Se generaron mensajes para los apoderados afectados.');
   const students = s.studentIds.map(getStudent);
@@ -1825,28 +1981,49 @@ function setAttendanceChip(studentId, btn){
   btn.classList.add('selected');
 }
 
-function confirmAttendance(sessionId){
+async function confirmAttendance(sessionId){
   const s = getSession(sessionId);
+  const real = isRealId(sessionId);
   const absentStudents = [];
-  s.studentIds.forEach(stId=>{
+  for(const stId of s.studentIds){
     const selectedBtn = document.querySelector(`#att-${stId} .chip-option.selected`);
     const val = selectedBtn ? selectedBtn.dataset.value : 'Presente';
     let rec = mockData.attendance.find(a=>a.sessionId===sessionId && a.studentId===stId);
-    if(!rec){ rec = {id:'AT'+Math.random().toString(36).slice(2,7), sessionId, studentId:stId, status:'', note:''}; mockData.attendance.push(rec); }
-    rec.status = val;
+    if(real && isRealId(stId)){
+      const { data, error } = await sb.from('attendance').upsert({session_id:sessionId, student_id:stId, status:val}, {onConflict:'session_id,student_id'}).select().single();
+      if(error){ console.error('Error guardando asistencia:', error.message); }
+      else if(rec){ rec.status = val; }
+      else { mockData.attendance.push(mapAttendanceRow(data)); }
+    } else {
+      if(!rec){ rec = {id:'AT'+Math.random().toString(36).slice(2,7), sessionId, studentId:stId, status:'', note:''}; mockData.attendance.push(rec); }
+      rec.status = val;
+    }
     if(val==='Ausente'){
       absentStudents.push(stId);
-      createRecoveryCredit(stId, 'Ausencia', sessionId);
+      await createRecoveryCredit(stId, 'Ausencia', sessionId);
     }
-  });
+  }
   const obs = document.getElementById('sessionObs').value.trim();
   if(obs){
     const leadIns = leadSessionInstructor(s);
-    mockData.observations.push({id:'O'+Math.random().toString(36).slice(2,7), studentId:s.studentIds[0], sessionId, instructorId: leadIns?leadIns.id:null, date:s.date, content:obs});
+    if(real){
+      const { data, error } = await sb.from('observations').insert({student_id:s.studentIds[0], session_id:sessionId, instructor_id: leadIns?leadIns.id:null, content:obs}).select().single();
+      if(!error && data) mockData.observations.push({id:data.id, studentId:data.student_id, sessionId:data.session_id, instructorId:data.instructor_id, date:data.date, content:data.content});
+    } else {
+      mockData.observations.push({id:'O'+Math.random().toString(36).slice(2,7), studentId:s.studentIds[0], sessionId, instructorId: leadIns?leadIns.id:null, date:s.date, content:obs});
+    }
   }
   s.status = 'Realizada';
+  if(real){
+    const { error } = await sb.from('sessions').update({status:'Realizada'}).eq('id', sessionId);
+    if(error) console.error('Error actualizando estado de la sesión:', error.message);
+  }
   // Si esta sesión era el destino de una recuperación agendada, queda utilizada.
-  mockData.recoveries.filter(r=>r.assignedSessionId===sessionId && r.status==='Agendada').forEach(r=>{ r.status='Utilizada'; });
+  const toResolve = mockData.recoveries.filter(r=>r.assignedSessionId===sessionId && r.status==='Agendada');
+  for(const r of toResolve){
+    r.status = 'Utilizada';
+    if(real && isRealId(r.id)) await sb.from('recoveries').update({status:'Utilizada'}).eq('id', r.id);
+  }
   closeModal();
   toast(absentStudents.length ? `Asistencia guardada. ${absentStudents.length} alumno(s) ausente(s) — se generó su recuperación pendiente.` : 'Asistencia guardada correctamente.');
   renderView(state.view);
@@ -2406,6 +2583,7 @@ function groupCardHtml(g){
       ${state.role==='admin' ? `
         <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openAddStudentsToGroupModal('${g.id}')" ${full?'disabled':''}>Agregar alumnos</button>
         <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openEditGroupModal('${g.id}')">Editar</button>
+        ${isRealId(g.id) ? `<button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openGenerateSessionsModal('${g.id}')">🗓️ Generar sesiones</button>` : ''}
       ` : ''}
     </div>
   </div>`;
@@ -2849,16 +3027,24 @@ function updateParticularAmount(){
 
 function openNewParticularModal(editSessionId){
   const editing = editSessionId ? getSession(editSessionId) : null;
+  const editingMock = editing && !isRealId(editSessionId);
   const isRecovery = !!recoveryContext;
   const recovery = isRecovery ? mockData.recoveries.find(r=>r.id===recoveryContext.recoveryId) : null;
-  const activeStudents = mockData.students.filter(s=>s.status==='Activo');
+  // Al crear o al editar una sesión real, los selectores solo ofrecen
+  // registros reales (de lo contrario el insert/update a Supabase fallaría).
+  // Al editar una sesión de demostración se mantiene el comportamiento
+  // anterior (100% mock) para no romper el prototipo de prueba.
+  const studentPool = editingMock ? mockData.students : realStudentRecords();
+  const instructorPool = editingMock ? mockData.instructors : realInstructorRecords();
+  const locationPool = editingMock ? mockData.locations : realLocationRecords();
+  const activeStudents = studentPool.filter(s=>s.status==='Activo');
   const selectedIds = editing ? editing.studentIds : (isRecovery ? [recovery.studentId] : []);
   const leadEntry = editing ? sessionInstructorEntries(editing)[0] : null;
 
   const studentPickerHtml = isRecovery
     ? `<div class="card-flat">🎯 Recuperación de <strong>${getStudent(recovery.studentId).name}</strong> — esta sesión no tiene costo para la familia.</div>`
     : `<div class="form-radio-group" id="np-students">
-        ${activeStudents.map(s=>`<button type="button" class="chip-option ${selectedIds.includes(s.id)?'selected':''}" data-student-id="${s.id}" onclick="toggleParticularStudent(this)">${s.name}</button>`).join('')}
+        ${activeStudents.map(s=>`<button type="button" class="chip-option ${selectedIds.includes(s.id)?'selected':''}" data-student-id="${s.id}" onclick="toggleParticularStudent(this)">${s.name}</button>`).join('') || '<span class="cell-muted">No hay alumnos disponibles todavía.</span>'}
       </div>`;
 
   const body = `
@@ -2870,11 +3056,11 @@ function openNewParticularModal(editSessionId){
       <div class="form-group"><label class="form-label">Horario</label><select class="form-select" id="np-time">${['10:00','11:00','16:00','17:00','18:00'].map(t=>`<option ${(editing?editing.start:'16:00')===t?'selected':''}>${t}</option>`).join('')}</select></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Instructor</label><select class="form-select" id="np-instructor" onchange="document.getElementById('np-amount').value = mockData.instructors.find(i=>i.id===this.value).ratePerClass;">${mockData.instructors.map(i=>`<option value="${i.id}" ${(editing?leadEntry.instructorId:mockData.instructors[0].id)===i.id?'selected':''}>${i.name}</option>`).join('')}</select></div>
-      <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="np-location">${mockData.locations.map(l=>`<option value="${l.id}" ${(editing?editing.locationId:mockData.locations[0].id)===l.id?'selected':''}>${l.name}</option>`).join('')}</select></div>
+      <div class="form-group"><label class="form-label">Instructor</label><select class="form-select" id="np-instructor" onchange="document.getElementById('np-amount').value = mockData.instructors.find(i=>i.id===this.value).ratePerClass;">${instructorPool.map(i=>`<option value="${i.id}" ${(editing?leadEntry?.instructorId:instructorPool[0]?.id)===i.id?'selected':''}>${i.name}</option>`).join('') || '<option value="">No hay instructores disponibles</option>'}</select></div>
+      <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="np-location">${locationPool.map(l=>`<option value="${l.id}" ${(editing?editing.locationId:locationPool[0]?.id)===l.id?'selected':''}>${l.name}</option>`).join('') || '<option value="">No hay locaciones disponibles</option>'}</select></div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Monto a pagar al instructor</label><input class="form-input" type="number" step="1000" id="np-amount" value="${editing?leadEntry.amount:mockData.instructors[0].ratePerClass}"></div>
+      <div class="form-group"><label class="form-label">Monto a pagar al instructor</label><input class="form-input" type="number" step="1000" id="np-amount" value="${editing?leadEntry?.amount:(instructorPool[0]?.ratePerClass||0)}"></div>
       <div class="form-group"><label class="form-label">Monto a cobrar al alumno</label><input class="form-input" type="number" step="1000" id="np-student-amount" ${isRecovery?'disabled':''} value="${isRecovery?0:(editing?(editing.studentAmount ?? particularPriceFor(editing.participantsCount)):particularPriceFor(selectedIds.length||1))}"></div>
     </div>
     <div class="form-hint">Tarifa referencial al alumno según cantidad de participantes: 1 = ${fmtMoney(PARTICULAR_PRICING[1])} · 2 = ${fmtMoney(PARTICULAR_PRICING[2])} · 3 = ${fmtMoney(PARTICULAR_PRICING[3])} · 4 = ${fmtMoney(PARTICULAR_PRICING[4])}. Ambos montos son editables para casos particulares. El sistema valida que el instructor y la locación no tengan otra sesión en el mismo horario.</div>
@@ -2883,9 +3069,13 @@ function openNewParticularModal(editSessionId){
   openModal({title: editing?'Editar sesión particular':'Nueva reserva particular', sub: isRecovery ? 'Sesión de recuperación' : '', bodyHtml:body, footHtml:foot});
 }
 
-function confirmNewParticular(editSessionId){
+async function confirmNewParticular(editSessionId){
   const isRecovery = !!recoveryContext;
   const recovery = isRecovery ? mockData.recoveries.find(r=>r.id===recoveryContext.recoveryId) : null;
+  const editing = editSessionId ? getSession(editSessionId) : null;
+  const editingMock = editing && !isRealId(editSessionId);
+  const willWriteReal = !editingMock && (!isRecovery || isRealId(recovery.id));
+
   const studentIds = isRecovery ? [recovery.studentId] : [...document.querySelectorAll('#np-students .chip-option.selected')].map(b=>b.dataset.studentId);
   if(!studentIds.length){ toast('Selecciona al menos un alumno.'); return; }
   const count = studentIds.length;
@@ -2893,6 +3083,7 @@ function confirmNewParticular(editSessionId){
   const start = document.getElementById('np-time').value;
   const instructorId = document.getElementById('np-instructor').value;
   const locationId = document.getElementById('np-location').value;
+  if(!instructorId || !locationId){ toast('Falta un instructor o una locación real disponible. Créalos primero en sus módulos.'); return; }
   const insAmount = parseInt(document.getElementById('np-amount').value) || getInstructor(instructorId).ratePerClass;
   const studentAmount = isRecovery ? 0 : (parseInt(document.getElementById('np-student-amount').value) || particularPriceFor(count));
 
@@ -2903,30 +3094,98 @@ function confirmNewParticular(editSessionId){
   }
   const endHour = String(parseInt(start.split(':')[0])+1).padStart(2,'0')+':'+start.split(':')[1];
 
+  if(!willWriteReal){
+    // ---- Comportamiento 100% mock, sin tocar Supabase (demo o edición de sesión de prueba) ----
+    if(editSessionId){
+      const s = getSession(editSessionId);
+      s.date=date; s.start=start; s.end=endHour; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count;
+      const entry = sessionInstructorEntries(s)[0];
+      entry.instructorId = instructorId; entry.amount = insAmount;
+      s.studentAmount = studentAmount;
+      if(s.studentPaymentId){
+        const pay = mockData.payments.find(p=>p.id===s.studentPaymentId);
+        if(pay){ pay.amount = studentAmount; pay.concept = `Clase particular — ${fmtDate(date)}`; }
+      }
+      closeModal();
+      toast('Sesión particular actualizada.');
+      renderView(state.view);
+      return;
+    }
+    const id = 'S'+Math.floor(200+Math.random()*700);
+    const sessionData = {id, groupId:null, date, start, end:endHour, instructors:[{instructorId, role:'Principal', amount:insAmount, status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}], locationId, status:'Programada', type:'particular', studentIds, participantsCount:count, studentAmount: isRecovery?0:studentAmount, studentPaymentId:null};
+    mockData.sessions.push(sessionData);
+    studentIds.forEach(studentId=>{
+      mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada', createdAt:'2026-08-11'});
+    });
+    if(isRecovery){
+      recovery.status = 'Agendada';
+      recovery.assignedSessionId = id;
+      recoveryContext = null;
+      toast('Sesión de recuperación creada y agendada, sin costo.');
+    } else {
+      const primaryFamily = getStudent(studentIds[0]).familyId;
+      const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+      const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:primaryFamily, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
+      mockData.payments.push(payment);
+      sessionData.studentPaymentId = payment.id;
+      toast('Reserva particular confirmada. Se generó el cobro pendiente al apoderado.');
+    }
+    closeModal();
+    renderView(state.view);
+    return;
+  }
+
+  // ---- Escritura real en Supabase ----
   if(editSessionId){
     const s = getSession(editSessionId);
-    s.date=date; s.start=start; s.end=endHour; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count;
+    const { error: updErr } = await sb.from('sessions').update({
+      date, start_time: start, end_time: endHour, location_id: locationId,
+      participants_count: count, student_amount: studentAmount,
+    }).eq('id', editSessionId);
+    if(updErr){ toast('Error al guardar: '+updErr.message); return; }
+    await sb.from('session_students').delete().eq('session_id', editSessionId);
+    if(studentIds.length) await sb.from('session_students').insert(studentIds.map(sid=>({session_id:editSessionId, student_id:sid})));
     const entry = sessionInstructorEntries(s)[0];
-    entry.instructorId = instructorId; entry.amount = insAmount;
-    s.studentAmount = studentAmount;
+    if(entry && entry._rowId){
+      await sb.from('session_instructors').update({instructor_id:instructorId, amount:insAmount}).eq('id', entry._rowId);
+    } else {
+      const { data: newEntry } = await sb.from('session_instructors').insert({session_id:editSessionId, instructor_id:instructorId, amount:insAmount, role:'Principal', status:'Pendiente'}).select().single();
+      if(newEntry) s.instructors = [{instructorId:newEntry.instructor_id, role:newEntry.role, amount:newEntry.amount, status:newEntry.status, note:newEntry.note||'', _rowId:newEntry.id}];
+    }
     if(s.studentPaymentId){
+      await sb.from('payments').update({amount:studentAmount, concept:`Clase particular — ${fmtDate(date)}`}).eq('id', s.studentPaymentId);
       const pay = mockData.payments.find(p=>p.id===s.studentPaymentId);
       if(pay){ pay.amount = studentAmount; pay.concept = `Clase particular — ${fmtDate(date)}`; }
     }
+    s.date=date; s.start=start; s.end=endHour; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count;
+    if(sessionInstructorEntries(s)[0]){ sessionInstructorEntries(s)[0].instructorId = instructorId; sessionInstructorEntries(s)[0].amount = insAmount; }
+    s.studentAmount = studentAmount;
     closeModal();
     toast('Sesión particular actualizada.');
     renderView(state.view);
     return;
   }
 
-  const id = 'S'+Math.floor(200+Math.random()*700);
-  const sessionData = {id, groupId:null, date, start, end:endHour, instructors:[{instructorId, role:'Principal', amount:insAmount, status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}], locationId, status:'Programada', type:'particular', studentIds, participantsCount:count, studentAmount: isRecovery?0:studentAmount, studentPaymentId:null};
+  const { data: sessRow, error: sessErr } = await sb.from('sessions').insert({
+    group_id: null, date, start_time: start, end_time: endHour, location_id: locationId,
+    status: 'Programada', type: 'particular', participants_count: count,
+    student_amount: isRecovery ? 0 : studentAmount,
+    is_recovery_session: isRecovery, recovery_for_student_id: isRecovery ? recovery.studentId : null,
+  }).select().single();
+  if(sessErr){ toast('Error al crear la sesión: '+sessErr.message); return; }
+  const id = sessRow.id;
+  const { data: insEntry } = await sb.from('session_instructors').insert({session_id:id, instructor_id:instructorId, amount:insAmount, role:'Principal', status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}).select().single();
+  await sb.from('session_students').insert(studentIds.map(sid=>({session_id:id, student_id:sid})));
+  const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada'}))).select();
+
+  const sessionData = mapSessionRow(sessRow);
+  sessionData.studentIds = studentIds;
+  sessionData.instructors = insEntry ? [{instructorId:insEntry.instructor_id, role:insEntry.role, amount:insEntry.amount, status:insEntry.status, note:insEntry.note||'', _rowId:insEntry.id}] : [];
   mockData.sessions.push(sessionData);
-  studentIds.forEach(studentId=>{
-    mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada', createdAt:'2026-08-11'});
-  });
+  (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
 
   if(isRecovery){
+    await sb.from('recoveries').update({status:'Agendada', assigned_session_id:id}).eq('id', recovery.id);
     recovery.status = 'Agendada';
     recovery.assignedSessionId = id;
     recoveryContext = null;
@@ -2934,9 +3193,16 @@ function confirmNewParticular(editSessionId){
   } else {
     const primaryFamily = getStudent(studentIds[0]).familyId;
     const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
-    const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:primaryFamily, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
-    mockData.payments.push(payment);
-    sessionData.studentPaymentId = payment.id;
+    const { data: payRow, error: payErr } = await sb.from('payments').insert({
+      family_id: primaryFamily, student_id: studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`,
+      period: date.slice(0,7), amount: studentAmount, status:'Pendiente',
+    }).select().single();
+    if(!payErr && payRow){
+      await sb.from('sessions').update({student_payment_id: payRow.id}).eq('id', id);
+      const payment = mapPaymentRow(payRow);
+      mockData.payments.push(payment);
+      sessionData.studentPaymentId = payment.id;
+    }
     toast('Reserva particular confirmada. Se generó el cobro pendiente al apoderado.');
   }
   closeModal();
@@ -3041,13 +3307,17 @@ function openScheduleRecoveryModal(recoveryId){
   openModal({title:'Agendar recuperación', sub:st.name, bodyHtml:body});
 }
 
-function assignRecoveryToSession(recoveryId, sessionId){
+async function assignRecoveryToSession(recoveryId, sessionId){
   if(!sessionId){ toast('Selecciona una sesión con cupo disponible.'); return; }
   const r = mockData.recoveries.find(x=>x.id===recoveryId);
   const s = getSession(sessionId);
   if(!s.studentIds.includes(r.studentId)) s.studentIds.push(r.studentId);
   r.status = 'Agendada';
   r.assignedSessionId = sessionId;
+  if(isRealId(recoveryId)){
+    await sb.from('recoveries').update({status:'Agendada', assigned_session_id:sessionId}).eq('id', recoveryId);
+    if(isRealId(sessionId) && isRealId(r.studentId)) await sb.from('session_students').insert({session_id:sessionId, student_id:r.studentId});
+  }
   closeModal();
   toast('Recuperación agendada correctamente.');
   renderView(state.view);
@@ -3478,6 +3748,8 @@ function apoderadoReserveGroup(studentId, groupId){
 function openApoderadoParticularModal(){
   const kids = familyChildren();
   const isRider = state.role==='apoderado' && state.accountType==='rider';
+  const real = isRealId(state.apoderadoFamilyId);
+  const locationPool = real ? realLocationRecords() : mockData.locations;
   const body = `
     <div class="form-group"><label class="form-label">${isRider?'¿Quién participa?':'Hijo(s) participantes'} (máx. 4)</label>
       <div class="form-radio-group" id="ap-students">
@@ -3501,7 +3773,7 @@ function openApoderadoParticularModal(){
       <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="ap-date" value="2026-08-17" min="2026-08-12"></div>
       <div class="form-group"><label class="form-label">Horario</label><select class="form-select" id="ap-time"><option>10:00</option><option>11:00</option><option selected>16:00</option><option>17:00</option><option>18:00</option></select></div>
     </div>
-    <div class="form-group"><label class="form-label">Locación preferida</label><select class="form-select" id="ap-location">${mockData.locations.map(l=>`<option value="${l.id}">${l.name}</option>`).join('')}</select></div>
+    <div class="form-group"><label class="form-label">Locación preferida</label><select class="form-select" id="ap-location">${locationPool.map(l=>`<option value="${l.id}">${l.name}</option>`).join('') || '<option value="">No hay locaciones disponibles todavía</option>'}</select></div>
     <div class="form-hint">Monto total para <strong id="ap-count-label">1</strong> participante(s): <strong id="ap-price">${fmtMoney(particularPriceFor(1))}</strong></div>
     <div class="form-hint">El instructor se asignará según disponibilidad. Nico confirmará el horario si hay algún cruce.</div>
   `;
@@ -3551,13 +3823,18 @@ function birthFromAge(age){
   const year = TODAY.getFullYear() - (isNaN(n) ? 10 : n);
   return `${year}-06-15`;
 }
-function confirmApoderadoParticular(){
+async function confirmApoderadoParticular(){
   const existingIds = [...document.querySelectorAll('#ap-students .chip-option.selected')].map(b=>b.dataset.studentId);
   const guestRows = [...document.querySelectorAll('.ap-guest-row')];
   const payMode = document.querySelector('input[name="ap-pay-mode"]:checked').value;
   const dividir = payMode==='dividir';
+  const real = isRealId(state.apoderadoFamilyId);
 
-  // Crea registros mínimos de alumno/familia para cada persona nueva agregada.
+  // Crea registros mínimos de alumno para cada persona nueva agregada.
+  // En el caso real, el invitado queda registrado bajo la MISMA familia que
+  // reserva (las políticas de acceso de Supabase no permiten que un
+  // apoderado cree una familia ajena) — igual se guarda su nombre/teléfono
+  // en el contacto de emergencia para poder cobrarle o contactarlo aparte.
   const newIds = [];
   for(const row of guestRows){
     const name = row.querySelector('.ap-guest-name').value.trim();
@@ -3566,11 +3843,23 @@ function confirmApoderadoParticular(){
     const phone = row.querySelector('.ap-guest-phone').value.trim();
     if(!name){ toast('Completa el nombre de cada persona agregada.'); return; }
     if(dividir && !phone){ toast(`Ingresa un teléfono de contacto para ${name} (necesario para dividir el cobro).`); return; }
-    const famId = 'F'+String(mockData.families.length+1).padStart(3,'0')+Math.random().toString(36).slice(2,4);
-    mockData.families.push({id:famId, apoderado:name, rut:'—', email:'—', phone: phone||'—', whatsapp: phone||'—', address:'—', accountType:null});
-    const stuId = 'A'+String(mockData.students.length+1).padStart(3,'0')+Math.random().toString(36).slice(2,4);
-    mockData.students.push({id:stuId, familyId:famId, name, birth: birthFromAge(age), level: level||'Básico', experience:'Invitado — clase particular puntual', groupId:null, status:'Prospecto', tariff:null, tariffNote:'Persona invitada (clase particular)', emergency1: phone?`${name} / ${phone}`:'Registrado por el apoderado que reservó', emergency2:'—', clinic:'No declarada', insurance:'No declarado', waiver:false, photo:null});
-    newIds.push(stuId);
+    if(real){
+      const { data, error } = await sb.from('students').insert({
+        family_id: state.apoderadoFamilyId, name, birth: birthFromAge(age), level: level||'Básico',
+        experience:'Invitado — clase particular puntual', status:'Prospecto',
+        tariff_note:'Persona invitada (clase particular)',
+        emergency_contact_1: phone?`${name} / ${phone}`:'Registrado por el apoderado que reservó',
+      }).select().single();
+      if(error){ toast('Error registrando participante: '+error.message); return; }
+      mockData.students.push(mapStudentRow(data));
+      newIds.push(data.id);
+    } else {
+      const famId = 'F'+String(mockData.families.length+1).padStart(3,'0')+Math.random().toString(36).slice(2,4);
+      mockData.families.push({id:famId, apoderado:name, rut:'—', email:'—', phone: phone||'—', whatsapp: phone||'—', address:'—', accountType:null});
+      const stuId = 'A'+String(mockData.students.length+1).padStart(3,'0')+Math.random().toString(36).slice(2,4);
+      mockData.students.push({id:stuId, familyId:famId, name, birth: birthFromAge(age), level: level||'Básico', experience:'Invitado — clase particular puntual', groupId:null, status:'Prospecto', tariff:null, tariffNote:'Persona invitada (clase particular)', emergency1: phone?`${name} / ${phone}`:'Registrado por el apoderado que reservó', emergency2:'—', clinic:'No declarada', insurance:'No declarado', waiver:false, photo:null});
+      newIds.push(stuId);
+    }
   }
   const studentIds = [...existingIds, ...newIds];
   if(!studentIds.length){ toast('Selecciona o agrega al menos un participante.'); return; }
@@ -3578,39 +3867,80 @@ function confirmApoderadoParticular(){
   const date = document.getElementById('ap-date').value;
   const start = document.getElementById('ap-time').value;
   const locationId = document.getElementById('ap-location').value;
-  const availableInstructor = mockData.instructors.find(ins=>ins.active && !mockData.sessions.some(s=>s.date===date && s.start===start && s.status==='Programada' && sessionInstructorEntries(s).some(e=>e.instructorId===ins.id)));
+  if(!locationId){ toast('No hay locación disponible para reservar todavía.'); return; }
+  const instructorPool = real ? realInstructorRecords() : mockData.instructors;
+  const availableInstructor = instructorPool.find(ins=>ins.active && !mockData.sessions.some(s=>s.date===date && s.start===start && s.status==='Programada' && sessionInstructorEntries(s).some(e=>e.instructorId===ins.id)));
   if(!availableInstructor){ toast('No hay instructores disponibles en ese horario. Elige otro horario.'); return; }
   const locationBusy = mockData.sessions.some(s=>s.date===date && s.start===start && s.status==='Programada' && s.locationId===locationId);
   if(locationBusy){ toast('Esa locación ya tiene una sesión en ese horario. Elige otra locación u horario.'); return; }
   const endHour = String(parseInt(start.split(':')[0])+1).padStart(2,'0')+':'+start.split(':')[1];
   const count = studentIds.length;
   const studentAmount = particularPriceFor(count);
-  const id = 'S'+Math.floor(200+Math.random()*700);
-  const sessionData = {id, groupId:null, date, start, end:endHour, instructors:[{instructorId:availableInstructor.id, role:'Principal', amount:availableInstructor.ratePerClass, status:'Pendiente', note:'Reserva particular vía app apoderado'}], locationId, status:'Programada', type:'particular', studentIds, participantsCount:count, studentAmount, studentPaymentId:null};
-  mockData.sessions.push(sessionData);
-  studentIds.forEach(studentId=>{
-    mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo:'particular', status:'Confirmada', createdAt:'2026-08-11'});
-  });
   const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+
+  let sessionData, id;
+  if(real){
+    const { data: sessRow, error: sessErr } = await sb.from('sessions').insert({
+      group_id:null, date, start_time:start, end_time:endHour, location_id:locationId,
+      status:'Programada', type:'particular', participants_count:count, student_amount:studentAmount,
+    }).select().single();
+    if(sessErr){ toast('Error al crear la reserva: '+sessErr.message); return; }
+    id = sessRow.id;
+    const { data: insEntry } = await sb.from('session_instructors').insert({session_id:id, instructor_id:availableInstructor.id, amount:availableInstructor.ratePerClass, role:'Principal', status:'Pendiente', note:'Reserva particular vía app apoderado'}).select().single();
+    await sb.from('session_students').insert(studentIds.map(sid=>({session_id:id, student_id:sid})));
+    const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:id, tipo:'particular', status:'Confirmada'}))).select();
+    sessionData = mapSessionRow(sessRow);
+    sessionData.studentIds = studentIds;
+    sessionData.instructors = insEntry ? [{instructorId:insEntry.instructor_id, role:insEntry.role, amount:insEntry.amount, status:insEntry.status, note:insEntry.note||'', _rowId:insEntry.id}] : [];
+    mockData.sessions.push(sessionData);
+    (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+  } else {
+    id = 'S'+Math.floor(200+Math.random()*700);
+    sessionData = {id, groupId:null, date, start, end:endHour, instructors:[{instructorId:availableInstructor.id, role:'Principal', amount:availableInstructor.ratePerClass, status:'Pendiente', note:'Reserva particular vía app apoderado'}], locationId, status:'Programada', type:'particular', studentIds, participantsCount:count, studentAmount, studentPaymentId:null};
+    mockData.sessions.push(sessionData);
+    studentIds.forEach(studentId=>{
+      mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo:'particular', status:'Confirmada', createdAt:'2026-08-11'});
+    });
+  }
 
   if(dividir){
     const base = Math.floor(studentAmount/count/1000)*1000;
     let assigned = 0;
-    studentIds.forEach((sid, i)=>{
+    for(let i=0;i<studentIds.length;i++){
+      const sid = studentIds[i];
       const isLast = i===studentIds.length-1;
       const amt = isLast ? (studentAmount-assigned) : base;
       assigned += amt;
       const stu = getStudent(sid);
-      const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:stu.familyId, studentId:sid, concept:`Clase particular compartida (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:amt, date:null, method:null, status:'Pendiente', receipt:null};
-      mockData.payments.push(payment);
-      if(sid===studentIds[0]) sessionData.studentPaymentId = payment.id;
-    });
+      if(real){
+        const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id:stu.familyId, student_id:sid, concept:`Clase particular compartida (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:amt, status:'Pendiente'}).select().single();
+        if(!payErr && payRow){
+          const payment = mapPaymentRow(payRow);
+          mockData.payments.push(payment);
+          if(sid===studentIds[0]){ sessionData.studentPaymentId = payment.id; await sb.from('sessions').update({student_payment_id:payment.id}).eq('id', id); }
+        }
+      } else {
+        const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:stu.familyId, studentId:sid, concept:`Clase particular compartida (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:amt, date:null, method:null, status:'Pendiente', receipt:null};
+        mockData.payments.push(payment);
+        if(sid===studentIds[0]) sessionData.studentPaymentId = payment.id;
+      }
+    }
     closeModal();
     toast(`Reserva particular confirmada para ${fmtDate(date)}. Cobro dividido entre ${count} participante(s).`);
   } else {
-    const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:state.apoderadoFamilyId, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
-    mockData.payments.push(payment);
-    sessionData.studentPaymentId = payment.id;
+    if(real){
+      const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id: state.apoderadoFamilyId, student_id:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, status:'Pendiente'}).select().single();
+      if(!payErr && payRow){
+        const payment = mapPaymentRow(payRow);
+        mockData.payments.push(payment);
+        sessionData.studentPaymentId = payment.id;
+        await sb.from('sessions').update({student_payment_id:payment.id}).eq('id', id);
+      }
+    } else {
+      const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:state.apoderadoFamilyId, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
+      mockData.payments.push(payment);
+      sessionData.studentPaymentId = payment.id;
+    }
     closeModal();
     toast(`Reserva particular confirmada para ${fmtDate(date)}. Cobro pendiente: ${fmtMoney(studentAmount)}.`);
   }
