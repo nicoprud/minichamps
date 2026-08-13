@@ -650,14 +650,18 @@ tbody tr.clickable:hover{background:var(--bg-3);}
 const TODAY = new Date('2026-08-11T09:00:00');
 
 function calcAge(birthISO){
+  if(!birthISO) return '—';
   const b = new Date(birthISO);
+  if(isNaN(b.getTime())) return '—';
   let age = TODAY.getFullYear() - b.getFullYear();
   const m = TODAY.getMonth() - b.getMonth();
   if(m < 0 || (m===0 && TODAY.getDate() < b.getDate())) age--;
   return age;
 }
 function fmtDate(iso){
+  if(!iso) return '—';
   const d = new Date(iso+'T00:00:00');
+  if(isNaN(d.getTime())) return '—';
   return d.toLocaleDateString('es-CL',{day:'2-digit',month:'short',year:'numeric'});
 }
 function fmtDateLong(iso){
@@ -1015,15 +1019,76 @@ function toggleSignupForm(show){
   showLoginMsg('');
 }
 
+/* ---- Mapeo Supabase (snake_case, uuid) <-> forma que usa el resto del código
+   (camelCase, mismos nombres de campo que mockData) — así los renderers y
+   helpers existentes (getStudent, studentsOfFamily, etc.) siguen funcionando
+   sin cambios, solo que ahora mockData.families/students vienen de la BD. ---- */
+function mapFamilyRow(row){
+  return {
+    id: row.id,
+    apoderado: row.apoderado_name,
+    rut: row.rut || '',
+    email: row.email || '',
+    phone: row.phone || '',
+    whatsapp: row.whatsapp || '',
+    address: row.address || '',
+    accountType: row.account_type || null,
+    photo: row.photo_url || null,
+  };
+}
+function mapStudentRow(row){
+  return {
+    id: row.id,
+    familyId: row.family_id,
+    name: row.name,
+    birth: row.birth,
+    level: row.level || 'Básico',
+    experience: row.experience || '',
+    groupId: row.group_id,
+    status: row.status,
+    tariff: row.tariff,
+    tariffNote: row.tariff_note || '',
+    emergency1: row.emergency_contact_1 || '—',
+    emergency2: row.emergency_contact_2 || '—',
+    clinic: row.clinic || 'No declarada',
+    insurance: row.insurance || 'No declarado',
+    waiver: !!row.waiver,
+    photo: row.photo_url || null,
+  };
+}
+
+/* Suma los datos reales de Supabase a mockData.families / mockData.students
+   (RLS filtra automáticamente qué filas le llegan a cada rol: admin ve todo,
+   apoderado/rider solo su propia familia, instructor ve todo en modo lectura).
+   OJO: no reemplazamos las familias/alumnos de demostración, los mantenemos
+   junto a los reales — varios módulos que todavía no están conectados a
+   Supabase (Calendario, Reservas, Recuperaciones, Comunicación) siguen
+   referenciando esos IDs de prueba, y reemplazarlos los rompería. Esto se
+   limpia cuando terminemos de migrar el resto de los módulos. */
+async function loadRealAlumnosFamilias(){
+  const [{ data: famRows, error: famErr }, { data: stuRows, error: stuErr }] = await Promise.all([
+    sb.from('families').select('*'),
+    sb.from('students').select('*'),
+  ]);
+  if(famErr) console.error('Error cargando familias:', famErr.message);
+  if(stuErr) console.error('Error cargando alumnos:', stuErr.message);
+  const realFamilies = (famRows||[]).map(mapFamilyRow);
+  const realStudents = (stuRows||[]).map(mapStudentRow);
+  mockData.families = [...mockData.families, ...realFamilies];
+  mockData.students = [...mockData.students, ...realStudents];
+}
+
 /* Toma el perfil (role / account_type / family_id / instructor_id) ya
    resuelto desde Supabase y arranca la app exactamente como antes,
    solo que ahora el rol viene de una cuenta real, no de un botón. */
-function enterAppFromProfile(profile, authUser){
+async function enterAppFromProfile(profile, authUser){
   state.role = profile.role;
   state.accountType = profile.account_type || null;
   state.apoderadoFamilyId = profile.family_id || null;
   state.instructorId = profile.instructor_id || null;
   state.userName = profile.full_name || authUser.email;
+
+  await loadRealAlumnosFamilias();
 
   if(state.role==='apoderado') state.apoderadoActiveChildId = studentsOfFamily(state.apoderadoFamilyId)[0]?.id || null;
   if(state.role==='instructor') state.calendarFilters.instructor = state.instructorId;
@@ -1046,7 +1111,7 @@ async function loadProfileAndEnter(authUser){
     await sb.auth.signOut();
     return;
   }
-  enterAppFromProfile(profile, authUser);
+  await enterAppFromProfile(profile, authUser);
 }
 
 async function handleLoginSubmit(){
@@ -1764,7 +1829,7 @@ function renderAlumnos(){
   return `
   <div class="page-head">
     <div><h1>Alumnos</h1><div class="page-sub">${mockData.students.length} alumnos registrados · ${mockData.students.filter(s=>s.status==='Activo').length} activos</div></div>
-    <button class="btn btn-primary" onclick="toast('En el prototipo, el alta de alumnos se simula desde el flujo de Apoderado → Mis hijos → Agregar hijo.')">+ Nuevo alumno</button>
+    <button class="btn btn-primary" onclick="openNewStudentModal()">+ Nuevo alumno</button>
   </div>
   <div class="filters-bar">
     <div class="search-input-wrap">
@@ -1900,7 +1965,7 @@ function openStudentModal(studentId, tab){
   `;
   const foot = state.role==='admin' ? `
     <button class="btn btn-secondary" onclick="closeModal();openChangeGroupModal('${studentId}')">🔁 Cambiar grupo</button>
-    <button class="btn btn-primary" onclick="toast('Edición completa disponible en la app conectada a Supabase.')">✏️ Editar alumno</button>
+    <button class="btn btn-primary" onclick="openEditStudentAdminModal('${studentId}')">✏️ Editar alumno</button>
   ` : (ownFamily ? `<button class="btn btn-primary" onclick="closeModal();openEditOwnProfileModal('${studentId}')">✏️ Editar información</button>` : '');
 
   openModal({title:s.name, sub:`${s.level} · ${statusBadgeText(s.status)} · ${fam.apoderado}`, bodyHtml:body, footHtml:foot, wide:true});
@@ -1912,14 +1977,112 @@ function handleStudentPhotoUpload(studentId, input){
   const file = input.files && input.files[0];
   if(!file) return;
   const reader = new FileReader();
-  reader.onload = function(e){
-    st.photo = e.target.result;
+  reader.onload = async function(e){
+    const dataUrl = e.target.result;
+    const { error } = await sb.from('students').update({ photo_url: dataUrl }).eq('id', studentId);
+    if(error){ toast('No se pudo guardar la foto: ' + error.message); return; }
+    st.photo = dataUrl;
     toast('Foto de perfil actualizada.');
     openStudentModal(studentId, lastStudentTab);
     renderView(state.view);
   };
   reader.readAsDataURL(file);
 }
+function openNewStudentModal(){
+  if(!mockData.families.length){ toast('Primero crea una familia para poder asignarle un alumno.'); return; }
+  const body = `
+    <div class="form-group"><label class="form-label">Familia</label><select class="form-select" id="ns-family">${mockData.families.map(f=>`<option value="${f.id}">${f.apoderado}</option>`).join('')}</select></div>
+    <div class="form-group"><label class="form-label">Nombre del alumno</label><input class="form-input" id="ns-name" placeholder="Nombre y apellido"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Fecha de nacimiento</label><input class="form-input" type="date" id="ns-birth" value="2017-01-01"></div>
+      <div class="form-group"><label class="form-label">Nivel</label><select class="form-select" id="ns-level"><option>Básico</option><option>Intermedio</option><option>Avanzado</option></select></div>
+    </div>
+    <div class="form-group"><label class="form-label">Experiencia</label><input class="form-input" id="ns-exp" placeholder="Ej: Sin experiencia previa"></div>
+    <div class="form-group"><label class="form-label">Estado</label><select class="form-select" id="ns-status"><option>Prospecto</option><option>Activo</option></select></div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmNewStudent()">Crear alumno</button>`;
+  openModal({title:'Nuevo alumno', bodyHtml:body, footHtml:foot});
+}
+async function confirmNewStudent(){
+  const familyId = document.getElementById('ns-family').value;
+  const name = document.getElementById('ns-name').value.trim();
+  if(!name){ toast('Ingresa el nombre del alumno.'); return; }
+  const fam = getFamily(familyId);
+  const payload = {
+    family_id: familyId, name,
+    birth: document.getElementById('ns-birth').value || null,
+    level: document.getElementById('ns-level').value,
+    experience: document.getElementById('ns-exp').value.trim() || 'Sin información',
+    status: document.getElementById('ns-status').value,
+    group_id: null, tariff: null, tariff_note: 'Pendiente de asignar grupo',
+    emergency_contact_1: fam ? `${fam.apoderado} / ${fam.whatsapp}` : '—', emergency_contact_2: '—',
+    clinic: 'No declarada', insurance: 'No declarado', waiver: false,
+  };
+  const { data, error } = await sb.from('students').insert(payload).select().single();
+  if(error){ toast('No se pudo crear: ' + error.message); return; }
+  mockData.students.push(mapStudentRow(data));
+  closeModal();
+  toast(`${name} fue agregado.`);
+  renderView(state.view);
+}
+
+function openEditStudentAdminModal(studentId){
+  closeModal();
+  const s = getStudent(studentId);
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre completo</label><input class="form-input" id="ea-name" value="${s.name}"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Fecha de nacimiento</label><input class="form-input" type="date" id="ea-birth" value="${s.birth||''}"></div>
+      <div class="form-group"><label class="form-label">Nivel</label><select class="form-select" id="ea-level">${['Básico','Intermedio','Avanzado'].map(l=>`<option ${s.level===l?'selected':''}>${l}</option>`).join('')}</select></div>
+    </div>
+    <div class="form-group"><label class="form-label">Experiencia</label><input class="form-input" id="ea-exp" value="${s.experience||''}"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Estado</label><select class="form-select" id="ea-status">${['Activo','Prospecto','Inactivo'].map(st=>`<option ${s.status===st?'selected':''}>${st}</option>`).join('')}</select></div>
+      <div class="form-group"><label class="form-label">Tarifa mensual</label><input class="form-input" type="number" step="1000" id="ea-tariff" value="${s.tariff||''}"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Nota de tarifa</label><input class="form-input" id="ea-tariffnote" value="${s.tariffNote||''}"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Contacto de emergencia 1</label><input class="form-input" id="ea-em1" value="${s.emergency1==='—'?'':s.emergency1}"></div>
+      <div class="form-group"><label class="form-label">Contacto de emergencia 2</label><input class="form-input" id="ea-em2" value="${s.emergency2==='—'?'':s.emergency2}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Clínica</label><input class="form-input" id="ea-clinic" value="${s.clinic==='No declarada'?'':s.clinic}"></div>
+      <div class="form-group"><label class="form-label">Seguro</label><input class="form-input" id="ea-insurance" value="${s.insurance==='No declarado'?'':s.insurance}"></div>
+    </div>
+    <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;margin-top:4px;cursor:pointer;"><input type="checkbox" id="ea-waiver" ${s.waiver?'checked':''}> Deslinde de responsabilidad firmado</label>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="openStudentModal('${studentId}','info')">Cancelar</button><button class="btn btn-primary" onclick="confirmEditStudentAdmin('${studentId}')">Guardar cambios</button>`;
+  openModal({title:'Editar alumno', sub:s.name, bodyHtml:body, footHtml:foot, wide:true});
+}
+async function confirmEditStudentAdmin(studentId){
+  const s = getStudent(studentId);
+  const name = document.getElementById('ea-name').value.trim();
+  if(!name){ toast('El nombre no puede quedar vacío.'); return; }
+  const payload = {
+    name,
+    birth: document.getElementById('ea-birth').value || null,
+    level: document.getElementById('ea-level').value,
+    experience: document.getElementById('ea-exp').value.trim() || null,
+    status: document.getElementById('ea-status').value,
+    tariff: document.getElementById('ea-tariff').value ? parseInt(document.getElementById('ea-tariff').value) : null,
+    tariff_note: document.getElementById('ea-tariffnote').value.trim() || null,
+    emergency_contact_1: document.getElementById('ea-em1').value.trim() || '—',
+    emergency_contact_2: document.getElementById('ea-em2').value.trim() || '—',
+    clinic: document.getElementById('ea-clinic').value.trim() || 'No declarada',
+    insurance: document.getElementById('ea-insurance').value.trim() || 'No declarado',
+    waiver: document.getElementById('ea-waiver').checked,
+  };
+  const { error } = await sb.from('students').update(payload).eq('id', studentId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  s.name = payload.name; s.birth = payload.birth; s.level = payload.level; s.experience = payload.experience;
+  s.status = payload.status; s.tariff = payload.tariff; s.tariffNote = payload.tariff_note;
+  s.emergency1 = payload.emergency_contact_1; s.emergency2 = payload.emergency_contact_2;
+  s.clinic = payload.clinic; s.insurance = payload.insurance; s.waiver = payload.waiver;
+  toast('Alumno actualizado.');
+  openStudentModal(studentId, 'info');
+  renderView(state.view);
+}
+
 function openEditOwnProfileModal(studentId){
   const s = getStudent(studentId);
   if(state.role==='apoderado' && s.familyId!==state.apoderadoFamilyId){ toast('No autorizado.'); return; }
@@ -1944,19 +2107,31 @@ function openEditOwnProfileModal(studentId){
   const foot = `<button class="btn btn-secondary" onclick="openStudentModal('${studentId}', lastStudentTab)">Cancelar</button><button class="btn btn-primary" onclick="confirmEditOwnProfile('${studentId}')">Guardar cambios</button>`;
   openModal({title:'Editar información', sub:s.name, bodyHtml:body, footHtml:foot});
 }
-function confirmEditOwnProfile(studentId){
+async function confirmEditOwnProfile(studentId){
   const s = getStudent(studentId);
   if(state.role==='apoderado' && s.familyId!==state.apoderadoFamilyId){ toast('No autorizado.'); return; }
   const name = document.getElementById('eo-name').value.trim();
   if(!name){ toast('El nombre no puede quedar vacío.'); return; }
-  s.name = name;
-  s.birth = document.getElementById('eo-birth').value || s.birth;
-  s.level = document.getElementById('eo-level').value;
-  s.experience = document.getElementById('eo-exp').value.trim() || s.experience;
-  s.emergency1 = document.getElementById('eo-em1').value.trim() || s.emergency1;
-  s.emergency2 = document.getElementById('eo-em2').value.trim() || '—';
-  s.clinic = document.getElementById('eo-clinic').value.trim() || 'No declarada';
-  s.insurance = document.getElementById('eo-insurance').value.trim() || 'No declarado';
+  const payload = {
+    name,
+    birth: document.getElementById('eo-birth').value || s.birth || null,
+    level: document.getElementById('eo-level').value,
+    experience: document.getElementById('eo-exp').value.trim() || s.experience,
+    emergency_contact_1: document.getElementById('eo-em1').value.trim() || s.emergency1,
+    emergency_contact_2: document.getElementById('eo-em2').value.trim() || '—',
+    clinic: document.getElementById('eo-clinic').value.trim() || 'No declarada',
+    insurance: document.getElementById('eo-insurance').value.trim() || 'No declarado',
+  };
+  const { error } = await sb.from('students').update(payload).eq('id', studentId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  s.name = payload.name;
+  s.birth = payload.birth;
+  s.level = payload.level;
+  s.experience = payload.experience;
+  s.emergency1 = payload.emergency_contact_1;
+  s.emergency2 = payload.emergency_contact_2;
+  s.clinic = payload.clinic;
+  s.insurance = payload.insurance;
   toast('Información actualizada.');
   openStudentModal(studentId, 'info');
   renderView(state.view);
@@ -2013,7 +2188,7 @@ function renderFamilias(){
   return `
   <div class="page-head">
     <div><h1>Familias</h1><div class="page-sub">${mockData.families.length} cuentas de apoderados · ${mockData.students.length} alumnos en total</div></div>
-    <button class="btn btn-primary" onclick="toast('En el prototipo, la creación de cuentas se simula desde el flujo público de registro.')">+ Nueva familia</button>
+    <button class="btn btn-primary" onclick="openNewFamilyModal()">+ Nueva familia</button>
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
     ${mockData.families.map(f=>{
@@ -2074,7 +2249,81 @@ function openFamilyModal(familyId, activeChildId){
       ${childBody}
     </div>
   `;
-  openModal({title:fam.apoderado, sub:`Familia · ${kids.length} hijo(s)`, bodyHtml:body, wide:true});
+  const foot = state.role==='admin' ? `<button class="btn btn-primary" onclick="openEditFamilyAdminModal('${familyId}')">✏️ Editar familia</button>` : '';
+  openModal({title:fam.apoderado, sub:`Familia · ${kids.length} hijo(s)`, bodyHtml:body, footHtml:foot, wide:true});
+}
+
+function openNewFamilyModal(){
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre del apoderado</label><input class="form-input" id="nf-name" placeholder="Ej: María González"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">RUT</label><input class="form-input" id="nf-rut" placeholder="12.345.678-9"></div>
+      <div class="form-group"><label class="form-label">Email</label><input class="form-input" type="email" id="nf-email"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">WhatsApp</label><input class="form-input" id="nf-whatsapp" placeholder="+56 9 ..."></div>
+      <div class="form-group"><label class="form-label">Dirección</label><input class="form-input" id="nf-address"></div>
+    </div>
+    <div class="form-hint">Esto crea el registro de la familia en el sistema, sin cuenta de acceso a la app. Si más adelante el apoderado se registra por su cuenta, avísame para vincular ambos registros.</div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmNewFamily()">Crear familia</button>`;
+  openModal({title:'Nueva familia', bodyHtml:body, footHtml:foot});
+}
+async function confirmNewFamily(){
+  const name = document.getElementById('nf-name').value.trim();
+  if(!name){ toast('Ingresa el nombre del apoderado.'); return; }
+  const whatsapp = document.getElementById('nf-whatsapp').value.trim() || null;
+  const payload = {
+    apoderado_name: name,
+    rut: document.getElementById('nf-rut').value.trim() || null,
+    email: document.getElementById('nf-email').value.trim() || null,
+    whatsapp, phone: whatsapp,
+    address: document.getElementById('nf-address').value.trim() || null,
+  };
+  const { data, error } = await sb.from('families').insert(payload).select().single();
+  if(error){ toast('No se pudo crear: ' + error.message); return; }
+  mockData.families.push(mapFamilyRow(data));
+  closeModal();
+  toast(`Familia "${name}" creada.`);
+  renderView(state.view);
+}
+
+function openEditFamilyAdminModal(familyId){
+  closeModal();
+  const fam = getFamily(familyId);
+  const body = `
+    <div class="form-group"><label class="form-label">Nombre del apoderado</label><input class="form-input" id="ef-name" value="${fam.apoderado}"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">RUT</label><input class="form-input" id="ef-rut" value="${fam.rut}"></div>
+      <div class="form-group"><label class="form-label">Email</label><input class="form-input" type="email" id="ef-email" value="${fam.email}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">WhatsApp</label><input class="form-input" id="ef-whatsapp" value="${fam.whatsapp}"></div>
+      <div class="form-group"><label class="form-label">Dirección</label><input class="form-input" id="ef-address" value="${fam.address}"></div>
+    </div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="openFamilyModal('${familyId}')">Cancelar</button><button class="btn btn-primary" onclick="confirmEditFamilyAdmin('${familyId}')">Guardar cambios</button>`;
+  openModal({title:'Editar familia', sub:fam.apoderado, bodyHtml:body, footHtml:foot});
+}
+async function confirmEditFamilyAdmin(familyId){
+  const fam = getFamily(familyId);
+  const name = document.getElementById('ef-name').value.trim();
+  if(!name){ toast('El nombre no puede quedar vacío.'); return; }
+  const whatsapp = document.getElementById('ef-whatsapp').value.trim() || fam.whatsapp;
+  const payload = {
+    apoderado_name: name,
+    rut: document.getElementById('ef-rut').value.trim() || fam.rut,
+    email: document.getElementById('ef-email').value.trim() || fam.email,
+    whatsapp, phone: whatsapp,
+    address: document.getElementById('ef-address').value.trim() || fam.address,
+  };
+  const { error } = await sb.from('families').update(payload).eq('id', familyId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  fam.apoderado = payload.apoderado_name; fam.rut = payload.rut; fam.email = payload.email;
+  fam.whatsapp = payload.whatsapp; fam.address = payload.address;
+  toast('Familia actualizada.');
+  openFamilyModal(familyId);
+  renderView(state.view);
 }
 
 
@@ -2949,17 +3198,22 @@ function openAddChildModal(){
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmAddChild()">Agregar hijo</button>`;
   openModal({title:'Agregar hijo', bodyHtml:body, footHtml:foot});
 }
-function confirmAddChild(){
+async function confirmAddChild(){
   const name = document.getElementById('ac-name').value.trim();
   if(!name){ toast('Ingresa el nombre del hijo.'); return; }
   const fam = getFamily(state.apoderadoFamilyId);
-  const id = 'A'+String(mockData.students.length+1).padStart(3,'0')+Math.random().toString(36).slice(2,4);
-  mockData.students.push({
-    id, familyId: state.apoderadoFamilyId, name, birth: document.getElementById('ac-birth').value,
-    level: document.getElementById('ac-level').value, experience: document.getElementById('ac-exp').value.trim()||'Sin información',
-    groupId:null, status:'Prospecto', tariff:null, tariffNote:'Pendiente de asignar grupo',
-    emergency1:`${fam.apoderado} / ${fam.whatsapp}`, emergency2:'—', clinic:'No declarada', insurance:'No declarado', waiver:false, photo:null,
-  });
+  const payload = {
+    family_id: state.apoderadoFamilyId, name,
+    birth: document.getElementById('ac-birth').value || null,
+    level: document.getElementById('ac-level').value,
+    experience: document.getElementById('ac-exp').value.trim() || 'Sin información',
+    group_id: null, status: 'Prospecto', tariff: null, tariff_note: 'Pendiente de asignar grupo',
+    emergency_contact_1: `${fam.apoderado} / ${fam.whatsapp}`, emergency_contact_2: '—',
+    clinic: 'No declarada', insurance: 'No declarado', waiver: false,
+  };
+  const { data, error } = await sb.from('students').insert(payload).select().single();
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  mockData.students.push(mapStudentRow(data));
   closeModal();
   toast(`${name} fue agregado a tu familia como prospecto.`);
   renderView(state.view);
@@ -3300,11 +3554,14 @@ function renderPerfilApoderado(){
     <button class="btn btn-primary btn-block" onclick="confirmSaveProfile()">Guardar cambios</button>
   </div>`;
 }
-function confirmSaveProfile(){
+async function confirmSaveProfile(){
   const fam = getFamily(state.apoderadoFamilyId);
-  fam.email = document.getElementById('pf-email').value.trim() || fam.email;
-  fam.whatsapp = document.getElementById('pf-whatsapp').value.trim() || fam.whatsapp;
-  fam.address = document.getElementById('pf-address').value.trim() || fam.address;
+  const email = document.getElementById('pf-email').value.trim() || fam.email;
+  const whatsapp = document.getElementById('pf-whatsapp').value.trim() || fam.whatsapp;
+  const address = document.getElementById('pf-address').value.trim() || fam.address;
+  const { error } = await sb.from('families').update({ email, whatsapp, phone: whatsapp, address }).eq('id', state.apoderadoFamilyId);
+  if(error){ toast('No se pudo guardar: ' + error.message); return; }
+  fam.email = email; fam.whatsapp = whatsapp; fam.address = address;
   toast('Datos de contacto actualizados.');
 }
 function handleFamilyPhotoUpload(input){
@@ -3312,8 +3569,11 @@ function handleFamilyPhotoUpload(input){
   const file = input.files && input.files[0];
   if(!file) return;
   const reader = new FileReader();
-  reader.onload = function(e){
-    fam.photo = e.target.result;
+  reader.onload = async function(e){
+    const dataUrl = e.target.result;
+    const { error } = await sb.from('families').update({ photo_url: dataUrl }).eq('id', state.apoderadoFamilyId);
+    if(error){ toast('No se pudo guardar la foto: ' + error.message); return; }
+    fam.photo = dataUrl;
     toast('Foto de perfil actualizada.');
     renderView(state.view);
   };
