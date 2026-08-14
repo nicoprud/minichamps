@@ -480,7 +480,8 @@ tbody tr.clickable:hover{background:var(--bg-3);}
 .group-card-level{font-size:11.5px;color:var(--text-2);margin-top:2px;}
 .group-meta-line{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--text-1);margin-top:10px;}
 .group-meta-line .ic{width:14px;text-align:center;opacity:.7;}
-.group-card-foot{display:flex;gap:8px;margin-top:14px;}
+.group-card-foot{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;}
+.group-card-foot .btn{flex:1 1 110px;white-space:nowrap;}
 
 /* ============================================================
    CALENDARIO
@@ -512,6 +513,7 @@ tbody tr.clickable:hover{background:var(--bg-3);}
   cursor:pointer;line-height:1.35;
 }
 .session-block.suspended{background:var(--danger-bg);border-color:rgba(239,68,68,.35);opacity:.8;text-decoration:line-through;}
+.session-block.available{background:var(--warning-bg);border-color:rgba(234,179,8,.35);color:var(--text-0);}
 .session-block .sb-time{font-size:10px;color:var(--text-2);font-weight:600;text-decoration:none;}
 .session-list-item{
   display:flex;align-items:center;gap:14px;padding:13px 16px;border-bottom:1px solid var(--border-soft);cursor:pointer;
@@ -954,6 +956,7 @@ const NAV_CONFIG = {
       {id:'inicio', label:'Inicio', icon:'🏠'},
       {id:'mis-hijos', label:'Mis hijos', icon:'🧒'},
       {id:'reservar', label:'Reservar', icon:'➕'},
+      {id:'clases-disponibles', label:'Clases disponibles', icon:'🟡'},
       {id:'mis-clases', label:'Mis clases', icon:'📅'},
       {id:'recuperaciones', label:'Recuperaciones', icon:'♻️'},
       {id:'pagos-apoderado', label:'Pagos', icon:'💳'},
@@ -969,6 +972,7 @@ const NAV_CONFIG = {
       {id:'alumnos-instructor', label:'Alumnos', icon:'🧒'},
       {id:'asistencia-instructor', label:'Asistencia', icon:'✅'},
       {id:'observaciones-instructor', label:'Observaciones', icon:'📝'},
+      {id:'mis-pagos-instructor', label:'Mis pagos', icon:'💰'},
     ]},
   ],
 };
@@ -992,6 +996,7 @@ const VIEW_TITLES = {
   inicio:['Inicio', null],
   'mis-hijos':['Mis hijos','Administra a cada uno de tus hijos'],
   reservar:['Reservar','Clase grupal o particular'],
+  'clases-disponibles':['Clases disponibles','Horarios particulares publicados por Nico'],
   'mis-clases':['Mis clases','Próximas sesiones de tus hijos'],
   recuperaciones:['Recuperaciones','Clases suspendidas y recuperables'],
   'pagos-apoderado':['Pagos','Estado de pagos de tu familia'],
@@ -1003,6 +1008,7 @@ const VIEW_TITLES = {
   'alumnos-instructor':['Alumnos','Alumnos de tus grupos'],
   'asistencia-instructor':['Asistencia','Toma de asistencia'],
   'observaciones-instructor':['Observaciones','Observaciones registradas'],
+  'mis-pagos-instructor':['Mis pagos','Tus clases realizadas y el estado de tu pago'],
 };
 
 /* ================================================================
@@ -1205,6 +1211,140 @@ async function loadRealHistorial(){
   if(gcErr) console.error('Error cargando historial de grupos:', gcErr.message);
   mockData.observations = [...mockData.observations, ...(obsRows||[]).map(mapObservationRow)];
   mockData.groupChangeLog = [...mockData.groupChangeLog, ...(gcRows||[]).map(mapGroupChangeRow)];
+}
+
+/* ---- Eliminar registros reales ----
+   Genérico: confirma con una advertencia clara y borra en Supabase; si la
+   base rechaza el borrado por una relación protegida (ej. un instructor con
+   sesiones ya pagadas, o una locación con sesiones activas), se muestra el
+   error tal cual en vez de fallar en silencio. Cuando el borrado sí ocurre,
+   se replica la misma limpieza en cascada que ya hace Postgres (on delete
+   cascade / set null) sobre los datos locales, para que la UI no quede
+   desincronizada del servidor. */
+function openDeleteConfirmModal({title, warning, onConfirmCall}){
+  const body = `<div class="alert severity-high"><div class="alert-ic">⚠️</div><div class="alert-desc">${warning}</div></div>`;
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-danger" onclick="${onConfirmCall}">Eliminar definitivamente</button>`;
+  openModal({title, bodyHtml:body, footHtml:foot});
+}
+
+function localCascadeAfterGroupDelete(groupId){
+  mockData.students.forEach(s=>{ if(s.groupId===groupId) s.groupId=null; });
+  mockData.sessions.forEach(s=>{ if(s.groupId===groupId) s.groupId=null; });
+}
+function localCascadeAfterStudentDelete(studentId){
+  mockData.payments.forEach(p=>{ if(p.studentId===studentId) p.studentId=null; });
+  mockData.attendance = mockData.attendance.filter(a=>a.studentId!==studentId);
+  mockData.recoveries = mockData.recoveries.filter(r=>r.studentId!==studentId);
+  mockData.observations = mockData.observations.filter(o=>o.studentId!==studentId);
+  mockData.bookings = mockData.bookings.filter(b=>b.studentId!==studentId);
+  mockData.groupChangeLog = mockData.groupChangeLog.filter(c=>c.studentId!==studentId);
+  mockData.sessions.forEach(s=>{ s.studentIds = (s.studentIds||[]).filter(id=>id!==studentId); });
+}
+function localCascadeAfterFamilyDelete(familyId){
+  mockData.students.filter(s=>s.familyId===familyId).map(s=>s.id).forEach(localCascadeAfterStudentDelete);
+  mockData.students = mockData.students.filter(s=>s.familyId!==familyId);
+  mockData.payments = mockData.payments.filter(p=>p.familyId!==familyId);
+}
+
+function openDeleteLocationModal(locationId){
+  const l = getLocation(locationId);
+  openDeleteConfirmModal({
+    title:'Eliminar locación', warning:`¿Eliminar "${l.name}"? Si tiene grupos o sesiones (pasadas o futuras) asociadas, Supabase va a rechazar el borrado — en ese caso reasigna esos grupos/sesiones a otra locación primero.`,
+    onConfirmCall:`confirmDeleteLocation('${locationId}')`,
+  });
+}
+async function confirmDeleteLocation(locationId){
+  const { error } = await sb.from('locations').delete().eq('id', locationId);
+  if(error){ toast('No se pudo eliminar: '+error.message); return; }
+  mockData.locations = mockData.locations.filter(l=>l.id!==locationId);
+  closeModal();
+  toast('Locación eliminada.');
+  renderView(state.view);
+}
+
+function openDeleteInstructorModal(instructorId){
+  const i = getInstructor(instructorId);
+  openDeleteConfirmModal({
+    title:'Eliminar instructor', warning:`¿Eliminar a "${i.name}"? Si ya dictó alguna clase (tiene historial de pago), Supabase va a rechazar el borrado para no perder ese historial — en ese caso márcalo como Inactivo en vez de eliminarlo.`,
+    onConfirmCall:`confirmDeleteInstructor('${instructorId}')`,
+  });
+}
+async function confirmDeleteInstructor(instructorId){
+  const { error } = await sb.from('instructors').delete().eq('id', instructorId);
+  if(error){ toast('No se pudo eliminar: '+error.message); return; }
+  mockData.instructors = mockData.instructors.filter(i=>i.id!==instructorId);
+  mockData.groups.forEach(g=>{ g.instructorIds = (g.instructorIds||[]).filter(id=>id!==instructorId); });
+  closeModal();
+  toast('Instructor eliminado.');
+  renderView(state.view);
+}
+
+function openDeleteGroupModal(groupId){
+  const g = getGroup(groupId);
+  const occ = studentsOfGroup(groupId).length;
+  openDeleteConfirmModal({
+    title:'Eliminar grupo', warning:`¿Eliminar "${g.name}"? ${occ ? `Sus ${occ} alumno(s) inscrito(s) quedarán sin grupo asignado (no se eliminan). ` : ''}Las sesiones ya generadas para este grupo tampoco se eliminan, solo quedan sin grupo asociado.`,
+    onConfirmCall:`confirmDeleteGroup('${groupId}')`,
+  });
+}
+async function confirmDeleteGroup(groupId){
+  const { error } = await sb.from('groups').delete().eq('id', groupId);
+  if(error){ toast('No se pudo eliminar: '+error.message); return; }
+  mockData.groups = mockData.groups.filter(g=>g.id!==groupId);
+  localCascadeAfterGroupDelete(groupId);
+  closeModal();
+  toast('Grupo eliminado.');
+  navigateTo('grupos');
+}
+
+function openDeleteStudentModal(studentId){
+  const s = getStudent(studentId);
+  openDeleteConfirmModal({
+    title:'Eliminar alumno', warning:`¿Eliminar a "${s.name}"? Esto borra también su historial de asistencia, recuperaciones, observaciones y reservas. Sus pagos quedan (sin alumno asociado). Esta acción no se puede deshacer.`,
+    onConfirmCall:`confirmDeleteStudent('${studentId}')`,
+  });
+}
+async function confirmDeleteStudent(studentId){
+  const { error } = await sb.from('students').delete().eq('id', studentId);
+  if(error){ toast('No se pudo eliminar: '+error.message); return; }
+  mockData.students = mockData.students.filter(s=>s.id!==studentId);
+  localCascadeAfterStudentDelete(studentId);
+  closeModal();
+  toast('Alumno eliminado.');
+  navigateTo('alumnos');
+}
+
+function openDeleteFamilyModal(familyId){
+  const f = getFamily(familyId);
+  const kids = studentsOfFamily(familyId);
+  openDeleteConfirmModal({
+    title:'Eliminar familia', warning:`¿Eliminar a "${f.apoderado}"? ${kids.length ? `Esto elimina TAMBIÉN a sus ${kids.length} alumno(s) (${kids.map(k=>k.name).join(', ')}) y todo su historial: asistencia, recuperaciones, reservas y pagos. ` : 'No tiene alumnos asociados. '}Esta acción no se puede deshacer.`,
+    onConfirmCall:`confirmDeleteFamily('${familyId}')`,
+  });
+}
+async function confirmDeleteFamily(familyId){
+  const { error } = await sb.from('families').delete().eq('id', familyId);
+  if(error){ toast('No se pudo eliminar: '+error.message); return; }
+  mockData.families = mockData.families.filter(f=>f.id!==familyId);
+  localCascadeAfterFamilyDelete(familyId);
+  closeModal();
+  toast('Familia eliminada.');
+  navigateTo('familias');
+}
+
+function openDeleteSessionModal(sessionId){
+  openDeleteConfirmModal({
+    title:'Eliminar horario disponible', warning:'¿Eliminar este horario? Como todavía no tiene alumno asignado, se puede borrar sin ningún efecto secundario.',
+    onConfirmCall:`confirmDeleteSession('${sessionId}')`,
+  });
+}
+async function confirmDeleteSession(sessionId){
+  const { error } = await sb.from('sessions').delete().eq('id', sessionId);
+  if(error){ toast('No se pudo eliminar: '+error.message); return; }
+  mockData.sessions = mockData.sessions.filter(s=>s.id!==sessionId);
+  closeModal();
+  toast('Horario eliminado.');
+  renderView(state.view);
 }
 
 /* ---- Generar próximas sesiones de un grupo real ----
@@ -1602,9 +1742,9 @@ function sessionRowMini(s){
     <div class="sl-time">${fmtDate(s.date)}<br><span style="color:var(--text-2);font-weight:600;font-size:11px;">${s.start}</span></div>
     <div class="sl-info">
       <div class="sl-title">${g ? g.name : 'Particular'} ${s.isRecoverySession ? '<span class=\"badge badge-info\" style=\"margin-left:6px;\">Recuperación</span>':''}</div>
-      <div class="sl-meta">${sessionInstructorNames(s)} · ${loc?.name} · ${occ}/${cap} alumnos</div>
+      <div class="sl-meta">${sessionInstructorNames(s)} · ${loc?.name || 'Sin locación'} · ${occ}/${cap} alumnos</div>
     </div>
-    <span class="badge ${s.status==='Realizada'?'badge-success':s.status==='Suspendida'?'badge-danger':'badge-info'}">${s.status}</span>
+    <span class="badge ${s.status==='Realizada'?'badge-success':s.status==='Suspendida'?'badge-danger':s.status==='Disponible'?'badge-warning':'badge-info'}">${s.status}</span>
   </div>`;
 }
 function emptyMini(msg){ return `<div class="empty-state" style="padding:24px 10px;"><div class="empty-ic">📭</div><div>${msg}</div></div>`; }
@@ -1653,6 +1793,7 @@ function calendarFiltersBar(){
     <select class="filter-select" onchange="state.calendarFilters.status=this.value;renderView('calendario')">
       ${opt('todos','Todos los estados',f.status)}
       ${opt('Programada','Programada',f.status)}
+      ${opt('Disponible','Disponible',f.status)}
       ${opt('Realizada','Realizada',f.status)}
       ${opt('Suspendida','Suspendida',f.status)}
     </select>
@@ -1697,10 +1838,10 @@ function sessionBlockHtml(s){
   const g = getGroup(s.groupId);
   const loc = getLocation(s.locationId);
   const label = g ? g.name : 'Particular';
-  return `<div class="session-block ${s.status==='Suspendida'?'suspended':''}" onclick="openSessionModal('${s.id}')">
+  return `<div class="session-block ${s.status==='Suspendida'?'suspended':''} ${s.status==='Disponible'?'available':''}" onclick="openSessionModal('${s.id}')">
     <div class="sb-time">${s.start}–${s.end}</div>
-    ${label}${s.isRecoverySession?' ♻️':''}<br>
-    <span style="font-weight:500;color:var(--text-2);">${loc?.name.split('—')[0].trim()}</span>
+    ${label}${s.isRecoverySession?' ♻️':''}${s.status==='Disponible'?' 🟡':''}<br>
+    <span style="font-weight:500;color:var(--text-2);">${(loc?.name || 'Sin locación').split('—')[0].trim()}</span>
   </div>`;
 }
 
@@ -1750,7 +1891,7 @@ function openSessionModal(sessionId){
 
   const body = `
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-      <span class="badge ${s.status==='Realizada'?'badge-success':s.status==='Suspendida'?'badge-danger':'badge-info'}">${s.status}</span>
+      <span class="badge ${s.status==='Realizada'?'badge-success':s.status==='Suspendida'?'badge-danger':s.status==='Disponible'?'badge-warning':'badge-info'}">${s.status}</span>
       <span class="badge badge-neutral">${s.type==='grupal'?'Clase grupal':'Clase particular'}</span>
       ${s.isRecoverySession?'<span class="badge badge-brand">Recuperación</span>':''}
     </div>
@@ -1758,7 +1899,7 @@ function openSessionModal(sessionId){
     <div class="child-info-row" style="border-top:none;"><span>Fecha</span><span>${fmtDateLong(s.date)}</span></div>
     <div class="child-info-row"><span>Horario</span><span>${s.start} – ${s.end}</span></div>
     <div class="child-info-row"><span>${g?'Grupo':'Servicio'}</span><span>${g ? g.name : 'Clase particular'}</span></div>
-    <div class="child-info-row"><span>Locación</span><span>${loc?.name}</span></div>
+    <div class="child-info-row"><span>Locación</span><span>${loc?.name || 'Sin asignar'}</span></div>
     <div class="child-info-row"><span>Ocupación</span><span>${students.length}/${cap} alumnos</span></div>
     ${s.type==='particular' ? `<div class="child-info-row"><span>Monto a cobrar al alumno</span><span>${s.studentAmount===0?'Sin costo (recuperación)':s.studentAmount==null?'Cubierto por pack':fmtMoney(s.studentAmount)} ${s.studentPaymentId?paymentBadge(mockData.payments.find(p=>p.id===s.studentPaymentId)?.status||'Pendiente'):''}</span></div>` : ''}
     <div style="margin-top:16px;">
@@ -1788,9 +1929,10 @@ function openSessionModal(sessionId){
     </div>
   `;
   const foot = state.role==='admin' ? `
-    ${s.type==='particular' && s.status==='Programada' ? `<button class="btn btn-secondary" onclick="closeModal();openNewParticularModal('${s.id}')">✏️ Editar sesión</button>` : ''}
+    ${s.type==='particular' && (s.status==='Programada' || s.status==='Disponible') ? `<button class="btn btn-secondary" onclick="closeModal();openNewParticularModal('${s.id}')">✏️ ${s.status==='Disponible'?'Editar / asignar alumno':'Editar sesión'}</button>` : ''}
     ${s.status==='Programada' ? `<button class="btn btn-secondary" onclick="closeModal();openAttendanceModal('${s.id}')">✅ Tomar asistencia</button>` : ''}
     ${canSuspend ? `<button class="btn btn-danger" onclick="closeModal();openSuspendModal('${s.id}')">⛈️ Suspender sesión</button>` : ''}
+    ${s.status==='Disponible' && isRealId(s.id) ? `<button class="btn btn-danger" onclick="openDeleteSessionModal('${s.id}')">🗑️ Eliminar horario</button>` : ''}
   ` : (state.role==='instructor' && s.status==='Programada' ? `<button class="btn btn-secondary" onclick="closeModal();openAttendanceModal('${s.id}')">✅ Tomar asistencia</button>` : '');
 
   openModal({title: g ? g.name : 'Clase particular', sub:`${fmtDate(s.date)} · ${s.start}–${s.end}`, bodyHtml:body, footHtml:foot});
@@ -2190,7 +2332,7 @@ function openStudentModal(studentId, tab){
   } else if(activeTab==='historial'){
     const sessIds = new Set(mockData.sessions.filter(sx=>sx.studentIds.includes(s.id)).map(sx=>sx.id));
     const events = [...sessIds].map(getSession).sort((a,b)=>b.date.localeCompare(a.date));
-    tabBody = events.map(ev=>`<div class="session-list-item" style="cursor:default;"><div class="sl-time">${fmtDate(ev.date)}</div><div class="sl-info"><div class="sl-title">${getGroup(ev.groupId)?.name || 'Particular'}</div><div class="sl-meta">${ev.start} · ${sessionInstructorNames(ev)} · ${getLocation(ev.locationId)?.name}</div></div>${ev.status==='Suspendida'?'<span class="badge badge-danger">Suspendida</span>':ev.status==='Realizada'?'<span class="badge badge-success">Realizada</span>':'<span class="badge badge-info">Programada</span>'}</div>`).join('') || '<div class="cell-muted" style="padding:14px;">Sin historial de sesiones.</div>';
+    tabBody = events.map(ev=>`<div class="session-list-item" style="cursor:default;"><div class="sl-time">${fmtDate(ev.date)}</div><div class="sl-info"><div class="sl-title">${getGroup(ev.groupId)?.name || 'Particular'}</div><div class="sl-meta">${ev.start} · ${sessionInstructorNames(ev)} · ${getLocation(ev.locationId)?.name || 'Sin locación'}</div></div>${ev.status==='Suspendida'?'<span class="badge badge-danger">Suspendida</span>':ev.status==='Realizada'?'<span class="badge badge-success">Realizada</span>':'<span class="badge badge-info">Programada</span>'}</div>`).join('') || '<div class="cell-muted" style="padding:14px;">Sin historial de sesiones.</div>';
   }
 
   const ownFamily = state.role==='apoderado' && s.familyId===state.apoderadoFamilyId;
@@ -2213,6 +2355,7 @@ function openStudentModal(studentId, tab){
     ${tabBody}
   `;
   const foot = state.role==='admin' ? `
+    ${isRealId(studentId) ? `<button class="btn btn-danger" onclick="openDeleteStudentModal('${studentId}')">🗑️ Eliminar</button>` : ''}
     <button class="btn btn-secondary" onclick="closeModal();openChangeGroupModal('${studentId}')">🔁 Cambiar grupo</button>
     <button class="btn btn-primary" onclick="openEditStudentAdminModal('${studentId}')">✏️ Editar alumno</button>
   ` : (ownFamily ? `<button class="btn btn-primary" onclick="closeModal();openEditOwnProfileModal('${studentId}')">✏️ Editar información</button>` : '');
@@ -2406,7 +2549,7 @@ function openChangeGroupModal(studentId){
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
           <div>
             <div style="font-weight:700;font-size:13.5px;">${g.name} ${!ageOk?'<span class=\"badge badge-warning\" style=\"margin-left:6px;\">Edad fuera de rango</span>':''}</div>
-            <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name}</div>
+            <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name || 'Sin locación'}</div>
             <div class="cell-muted">Tarifa: ${fmtMoney(g.tariff)}/mes ${currentGroup && currentGroup.tariff!==g.tariff ? `<span style="color:${g.tariff>currentGroup.tariff?'var(--danger)':'var(--success)'}">(actual ${fmtMoney(currentGroup.tariff)})</span>`:''}</div>
           </div>
           <button class="btn btn-sm ${full?'btn-secondary':'btn-primary'}" ${full?'disabled':''} onclick="confirmChangeGroup('${studentId}','${g.id}')">${full?'Sin cupo':'Mover aquí'}</button>
@@ -2499,7 +2642,7 @@ function openFamilyModal(familyId, activeChildId){
       ${childBody}
     </div>
   `;
-  const foot = state.role==='admin' ? `<button class="btn btn-primary" onclick="openEditFamilyAdminModal('${familyId}')">✏️ Editar familia</button>` : '';
+  const foot = state.role==='admin' ? `${isRealId(familyId) ? `<button class="btn btn-danger" onclick="openDeleteFamilyModal('${familyId}')">🗑️ Eliminar</button>` : ''}<button class="btn btn-primary" onclick="openEditFamilyAdminModal('${familyId}')">✏️ Editar familia</button>` : '';
   openModal({title:fam.apoderado, sub:`Familia · ${kids.length} hijo(s)`, bodyHtml:body, footHtml:foot, wide:true});
 }
 
@@ -2602,16 +2745,16 @@ function groupCardHtml(g){
     </div>
     <div class="group-meta-line"><span class="ic">📅</span>${g.day} · ${g.time} (${g.duration} min)</div>
     <div class="group-meta-line"><span class="ic">🧑‍🏫</span>${groupInstructorNames(g)}</div>
-    <div class="group-meta-line"><span class="ic">📍</span>${loc?.name}</div>
+    <div class="group-meta-line"><span class="ic">📍</span>${loc?.name || 'Sin locación asignada'}</div>
     <div class="group-meta-line"><span class="ic">💵</span>${fmtMoney(g.tariff)} / mes · ${g.transferPlan}</div>
     <div class="capacity-bar"><div class="capacity-bar-fill ${full?'full':occ<=2?'low':''}" style="width:${Math.min(100,occ/g.capacity*100)}%"></div></div>
     <div class="cell-muted" style="margin-top:6px;">${occ}/${g.capacity} alumnos</div>
     <div class="group-card-foot">
-      <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openGroupStudentsModal('${g.id}')">Ver alumnos</button>
+      <button class="btn btn-secondary btn-sm" onclick="openGroupStudentsModal('${g.id}')">Ver alumnos</button>
       ${state.role==='admin' ? `
-        <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openAddStudentsToGroupModal('${g.id}')" ${full?'disabled':''}>Agregar alumnos</button>
-        <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openEditGroupModal('${g.id}')">Editar</button>
-        ${isRealId(g.id) ? `<button class="btn btn-secondary btn-sm" style="flex:1;" onclick="openGenerateSessionsModal('${g.id}')">🗓️ Generar sesiones</button>` : ''}
+        <button class="btn btn-secondary btn-sm" onclick="openAddStudentsToGroupModal('${g.id}')" ${full?'disabled':''}>Agregar alumnos</button>
+        <button class="btn btn-secondary btn-sm" onclick="openEditGroupModal('${g.id}')">Editar</button>
+        ${isRealId(g.id) ? `<button class="btn btn-secondary btn-sm" onclick="openGenerateSessionsModal('${g.id}')">🗓️ Generar sesiones</button>` : ''}
       ` : ''}
     </div>
   </div>`;
@@ -2697,6 +2840,11 @@ function openEditGroupModal(groupId){
       <div class="form-group"><label class="form-label">Cupo máximo</label><input class="form-input" type="number" min="${studentsOfGroup(g.id).length}" id="eg-cap" value="${g.capacity}"></div>
       <div class="form-group"><label class="form-label">Tarifa mensual</label><input class="form-input" type="number" step="1000" id="eg-tariff" value="${g.tariff}"></div>
     </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Día</label><select class="form-select" id="eg-day">${['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'].map(d=>`<option ${d===g.day?'selected':''}>${d}</option>`).join('')}</select></div>
+      <div class="form-group"><label class="form-label">Hora</label><input class="form-input" type="time" id="eg-time" value="${g.time}"></div>
+      <div class="form-group"><label class="form-label">Duración (min)</label><input class="form-input" type="number" step="15" min="15" id="eg-duration" value="${g.duration||60}"></div>
+    </div>
     <div class="form-group"><label class="form-label">Instructores a cargo (puede ser más de uno)</label>${instructorChipPickerReal('eg-instructors', g.instructorIds||[])}</div>
     <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="eg-location"><option value="">— Sin asignar —</option>${locations.map(l=>`<option value="${l.id}" ${l.id===g.locationId?'selected':''}>${l.name}</option>`).join('')}</select></div>
     <div class="form-group"><label class="form-label">Estado</label>
@@ -2707,7 +2855,7 @@ function openEditGroupModal(groupId){
     </div>
     <div class="form-hint">El cupo mínimo permitido es la cantidad actual de alumnos inscritos (${studentsOfGroup(g.id).length}). El monto que se le paga a cada instructor se define por sesión, no aquí.</div>
   `;
-  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmEditGroup('${groupId}')">Guardar cambios</button>`;
+  const foot = `<button class="btn btn-danger" onclick="openDeleteGroupModal('${groupId}')">🗑️ Eliminar</button><button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmEditGroup('${groupId}')">Guardar cambios</button>`;
   openModal({title:'Editar grupo', sub:g.name, bodyHtml:body, footHtml:foot});
 }
 
@@ -2722,6 +2870,9 @@ async function confirmEditGroup(groupId){
     tariff: parseInt(document.getElementById('eg-tariff').value)||g.tariff,
     location_id: document.getElementById('eg-location').value || null,
     active: document.getElementById('eg-active-yes').classList.contains('selected'),
+    day: document.getElementById('eg-day').value,
+    start_time: document.getElementById('eg-time').value,
+    duration_minutes: parseInt(document.getElementById('eg-duration').value) || g.duration || 60,
   };
   const { error } = await sb.from('groups').update(payload).eq('id', groupId);
   if(error){ toast('No se pudo guardar: ' + error.message); return; }
@@ -2732,6 +2883,7 @@ async function confirmEditGroup(groupId){
   }
   g.name = payload.name; g.capacity = payload.capacity; g.tariff = payload.tariff;
   g.locationId = payload.location_id; g.active = payload.active; g.instructorIds = instructorIds;
+  g.day = payload.day; g.time = payload.start_time; g.duration = payload.duration_minutes;
   closeModal();
   toast('Grupo actualizado.');
   renderView(state.view);
@@ -2752,6 +2904,7 @@ function openCreateGroupModal(){
     <div class="form-row">
       <div class="form-group"><label class="form-label">Día</label><select class="form-select" id="ng-day"><option>Lunes</option><option>Martes</option><option>Miércoles</option><option>Jueves</option><option>Viernes</option><option>Sábado</option><option>Domingo</option></select></div>
       <div class="form-group"><label class="form-label">Hora</label><input class="form-input" type="time" id="ng-time" value="17:00"></div>
+      <div class="form-group"><label class="form-label">Duración (min)</label><input class="form-input" type="number" step="15" min="15" id="ng-duration" value="60"></div>
     </div>
     <div class="form-group"><label class="form-label">Instructores a cargo (puede ser más de uno)</label>${instructorChipPickerReal('ng-instructors', [])}</div>
     <div class="form-group"><label class="form-label">Locación</label><select class="form-select" id="ng-location"><option value="">— Sin asignar —</option>${locations.map(l=>`<option value="${l.id}">${l.name}</option>`).join('')}</select></div>
@@ -2770,7 +2923,7 @@ async function confirmCreateGroup(){
     age_max: parseInt(document.getElementById('ng-agemax').value)||18,
     day: document.getElementById('ng-day').value,
     start_time: document.getElementById('ng-time').value,
-    duration_minutes: 60,
+    duration_minutes: parseInt(document.getElementById('ng-duration').value) || 60,
     location_id: document.getElementById('ng-location').value || null,
     capacity: parseInt(document.getElementById('ng-cap').value)||6,
     tariff: parseInt(document.getElementById('ng-tariff').value)||90000,
@@ -2855,7 +3008,7 @@ function openEditLocationModal(locationId){
     <div class="form-group"><label class="form-label">Descripción</label><input class="form-input" id="el-desc" value="${l.desc}"></div>
     <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;margin-top:4px;"><input type="checkbox" id="el-active" ${l.active?'checked':''}> Locación activa</label>
   `;
-  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmEditLocation('${locationId}')">Guardar cambios</button>`;
+  const foot = `<button class="btn btn-danger" onclick="openDeleteLocationModal('${locationId}')">🗑️ Eliminar</button><button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmEditLocation('${locationId}')">Guardar cambios</button>`;
   openModal({title:'Editar locación', sub:l.name, bodyHtml:body, footHtml:foot});
 }
 async function confirmEditLocation(locationId){
@@ -2973,7 +3126,7 @@ function openEditInstructorModal(instructorId){
     <div class="form-group"><label class="form-label">Tarifa base por clase</label><input class="form-input" type="number" step="1000" id="ei-rate" value="${i.ratePerClass}"></div>
     <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;margin-top:4px;"><input type="checkbox" id="ei-active" ${i.active?'checked':''}> Instructor activo</label>
   `;
-  const foot = `<button class="btn btn-secondary" onclick="openInstructorModal('${instructorId}')">Cancelar</button><button class="btn btn-primary" onclick="confirmEditInstructor('${instructorId}')">Guardar cambios</button>`;
+  const foot = `<button class="btn btn-danger" onclick="openDeleteInstructorModal('${instructorId}')">🗑️ Eliminar</button><button class="btn btn-secondary" onclick="openInstructorModal('${instructorId}')">Cancelar</button><button class="btn btn-primary" onclick="confirmEditInstructor('${instructorId}')">Guardar cambios</button>`;
   openModal({title:'Editar instructor', sub:i.name, bodyHtml:body, footHtml:foot});
 }
 async function confirmEditInstructor(instructorId){
@@ -3076,12 +3229,14 @@ function openNewParticularModal(editSessionId){
       </div>`;
 
   const body = `
-    <div class="form-group"><label class="form-label">Alumno(s) participantes (máx. 4) — <span id="np-count-label">${selectedIds.length||1}</span> seleccionado(s)</label>
+    <div class="form-group"><label class="form-label">Alumno(s) participantes (máx. 4, opcional) — <span id="np-count-label">${selectedIds.length||1}</span> seleccionado(s)</label>
       ${studentPickerHtml}
+      ${!isRecovery ? `<div class="form-hint" style="margin-top:6px;">Si no seleccionas ningún alumno, la clase queda publicada como <strong>Disponible</strong> para que un apoderado o rider la reserve más adelante.</div>` : ''}
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="np-date" value="${editing?editing.date:'2026-08-17'}" min="2026-08-12"></div>
-      <div class="form-group"><label class="form-label">Horario</label><select class="form-select" id="np-time">${['10:00','11:00','16:00','17:00','18:00'].map(t=>`<option ${(editing?editing.start:'16:00')===t?'selected':''}>${t}</option>`).join('')}</select></div>
+      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="np-date" value="${editing?editing.date:todayISO()}"></div>
+      <div class="form-group"><label class="form-label">Horario</label><input class="form-input" type="time" id="np-time" value="${editing?editing.start:'16:00'}"></div>
+      <div class="form-group"><label class="form-label">Duración (min)</label><input class="form-input" type="number" step="15" min="15" id="np-duration" value="${editing?(editing.duration||60):60}"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Instructor</label><select class="form-select" id="np-instructor" onchange="document.getElementById('np-amount').value = mockData.instructors.find(i=>i.id===this.value).ratePerClass;">${instructorPool.map(i=>`<option value="${i.id}" ${(editing?leadEntry?.instructorId:instructorPool[0]?.id)===i.id?'selected':''}>${i.name}</option>`).join('') || '<option value="">No hay instructores disponibles</option>'}</select></div>
@@ -3089,12 +3244,12 @@ function openNewParticularModal(editSessionId){
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Monto a pagar al instructor</label><input class="form-input" type="number" step="1000" id="np-amount" value="${editing?leadEntry?.amount:(instructorPool[0]?.ratePerClass||0)}"></div>
-      <div class="form-group"><label class="form-label">Monto a cobrar al alumno</label><input class="form-input" type="number" step="1000" id="np-student-amount" ${isRecovery?'disabled':''} value="${isRecovery?0:(editing?(editing.studentAmount ?? particularPriceFor(editing.participantsCount)):particularPriceFor(selectedIds.length||1))}"></div>
+      <div class="form-group"><label class="form-label">Monto a cobrar al alumno</label><input class="form-input" type="number" step="1000" id="np-student-amount" ${isRecovery?'disabled':''} value="${isRecovery?0:(editing?(editing.studentAmount ?? particularPriceFor(editing.participantsCount||1)):particularPriceFor(selectedIds.length||1))}"></div>
     </div>
     <div class="form-hint">Tarifa referencial al alumno según cantidad de participantes: 1 = ${fmtMoney(PARTICULAR_PRICING[1])} · 2 = ${fmtMoney(PARTICULAR_PRICING[2])} · 3 = ${fmtMoney(PARTICULAR_PRICING[3])} · 4 = ${fmtMoney(PARTICULAR_PRICING[4])}. Ambos montos son editables para casos particulares. El sistema valida que el instructor y la locación no tengan otra sesión en el mismo horario.</div>
   `;
-  const foot = `<button class="btn btn-secondary" onclick="closeModal();recoveryContext=null;">Cancelar</button><button class="btn btn-primary" onclick="confirmNewParticular(${editing?`'${editSessionId}'`:'null'})">${editing?'Guardar cambios':'Validar y reservar'}</button>`;
-  openModal({title: editing?'Editar sesión particular':'Nueva reserva particular', sub: isRecovery ? 'Sesión de recuperación' : '', bodyHtml:body, footHtml:foot});
+  const foot = `<button class="btn btn-secondary" onclick="closeModal();recoveryContext=null;">Cancelar</button><button class="btn btn-primary" onclick="confirmNewParticular(${editing?`'${editSessionId}'`:'null'})">${editing?'Guardar cambios':'Guardar'}</button>`;
+  openModal({title: editing?'Editar sesión particular':'Nueva clase particular', sub: isRecovery ? 'Sesión de recuperación' : '', bodyHtml:body, footHtml:foot});
 }
 
 async function confirmNewParticular(editSessionId){
@@ -3105,32 +3260,45 @@ async function confirmNewParticular(editSessionId){
   const willWriteReal = !editingMock && (!isRecovery || isRealId(recovery.id));
 
   const studentIds = isRecovery ? [recovery.studentId] : [...document.querySelectorAll('#np-students .chip-option.selected')].map(b=>b.dataset.studentId);
-  if(!studentIds.length){ toast('Selecciona al menos un alumno.'); return; }
   const count = studentIds.length;
   const date = document.getElementById('np-date').value;
   const start = document.getElementById('np-time').value;
+  const duration = parseInt(document.getElementById('np-duration').value) || 60;
   const instructorId = document.getElementById('np-instructor').value;
   const locationId = document.getElementById('np-location').value;
   if(!instructorId || !locationId){ toast('Falta un instructor o una locación real disponible. Créalos primero en sus módulos.'); return; }
   const insAmount = parseInt(document.getElementById('np-amount').value) || getInstructor(instructorId).ratePerClass;
-  const studentAmount = isRecovery ? 0 : (parseInt(document.getElementById('np-student-amount').value) || particularPriceFor(count));
+  const studentAmount = isRecovery ? 0 : (parseInt(document.getElementById('np-student-amount').value) || particularPriceFor(count||1));
+  const willBeAvailable = !isRecovery && count===0;
 
-  const clash = mockData.sessions.some(s=>s.id!==editSessionId && s.date===date && s.start===start && s.status==='Programada' && (sessionInstructorEntries(s).some(e=>e.instructorId===instructorId) || s.locationId===locationId));
+  const clash = mockData.sessions.some(s=>s.id!==editSessionId && s.date===date && s.start===start && (s.status==='Programada'||s.status==='Disponible') && (sessionInstructorEntries(s).some(e=>e.instructorId===instructorId) || s.locationId===locationId));
   if(clash){
     toast('⚠️ El instructor o la locación ya tienen una sesión en ese horario. Elige otra combinación.');
     return;
   }
-  const endHour = String(parseInt(start.split(':')[0])+1).padStart(2,'0')+':'+start.split(':')[1];
+  const endHour = addMinutesToTime(start, duration);
 
   if(!willWriteReal){
     // ---- Comportamiento 100% mock, sin tocar Supabase (demo o edición de sesión de prueba) ----
     if(editSessionId){
       const s = getSession(editSessionId);
-      s.date=date; s.start=start; s.end=endHour; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count;
+      if(s.status==='Programada' && willBeAvailable){ toast('Esta sesión ya tiene alumno y cobro asociado — usa "Suspender" o elimínala en vez de vaciarla.'); return; }
+      s.date=date; s.start=start; s.end=endHour; s.duration=duration; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count;
+      s.status = willBeAvailable ? 'Disponible' : 'Programada';
       const entry = sessionInstructorEntries(s)[0];
-      entry.instructorId = instructorId; entry.amount = insAmount;
+      if(entry){ entry.instructorId = instructorId; entry.amount = insAmount; }
       s.studentAmount = studentAmount;
-      if(s.studentPaymentId){
+      if(studentIds.length && !s.studentPaymentId && !isRecovery){
+        // Se está asignando alumno por primera vez a un horario mock que estaba Disponible.
+        studentIds.forEach(studentId=>{
+          mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:editSessionId, tipo:'particular', status:'Confirmada', createdAt:todayISO()});
+        });
+        const primaryFamily = getStudent(studentIds[0]).familyId;
+        const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+        const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:primaryFamily, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
+        mockData.payments.push(payment);
+        s.studentPaymentId = payment.id;
+      } else if(s.studentPaymentId){
         const pay = mockData.payments.find(p=>p.id===s.studentPaymentId);
         if(pay){ pay.amount = studentAmount; pay.concept = `Clase particular — ${fmtDate(date)}`; }
       }
@@ -3140,7 +3308,7 @@ async function confirmNewParticular(editSessionId){
       return;
     }
     const id = 'S'+Math.floor(200+Math.random()*700);
-    const sessionData = {id, groupId:null, date, start, end:endHour, instructors:[{instructorId, role:'Principal', amount:insAmount, status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}], locationId, status:'Programada', type:'particular', studentIds, participantsCount:count, studentAmount: isRecovery?0:studentAmount, studentPaymentId:null};
+    const sessionData = {id, groupId:null, date, start, end:endHour, duration, instructors:[{instructorId, role:'Principal', amount:insAmount, status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}], locationId, status: willBeAvailable?'Disponible':'Programada', type:'particular', studentIds, participantsCount:count, studentAmount: isRecovery?0:studentAmount, studentPaymentId:null};
     mockData.sessions.push(sessionData);
     studentIds.forEach(studentId=>{
       mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada', createdAt:'2026-08-11'});
@@ -3150,6 +3318,8 @@ async function confirmNewParticular(editSessionId){
       recovery.assignedSessionId = id;
       recoveryContext = null;
       toast('Sesión de recuperación creada y agendada, sin costo.');
+    } else if(willBeAvailable){
+      toast('Horario publicado como Disponible.');
     } else {
       const primaryFamily = getStudent(studentIds[0]).familyId;
       const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
@@ -3166,9 +3336,11 @@ async function confirmNewParticular(editSessionId){
   // ---- Escritura real en Supabase ----
   if(editSessionId){
     const s = getSession(editSessionId);
+    if(s.status==='Programada' && willBeAvailable){ toast('Esta sesión ya tiene alumno y cobro asociado — usa "Suspender" o elimínala en vez de vaciarla.'); return; }
+    const newStatus = willBeAvailable ? 'Disponible' : 'Programada';
     const { error: updErr } = await sb.from('sessions').update({
-      date, start_time: start, end_time: endHour, location_id: locationId,
-      participants_count: count, student_amount: studentAmount,
+      date, start_time: start, end_time: endHour, duration_minutes: duration, location_id: locationId,
+      participants_count: count, student_amount: studentAmount, status: newStatus,
     }).eq('id', editSessionId);
     if(updErr){ toast('Error al guardar: '+updErr.message); return; }
     await sb.from('session_students').delete().eq('session_id', editSessionId);
@@ -3180,37 +3352,53 @@ async function confirmNewParticular(editSessionId){
       const { data: newEntry } = await sb.from('session_instructors').insert({session_id:editSessionId, instructor_id:instructorId, amount:insAmount, role:'Principal', status:'Pendiente'}).select().single();
       if(newEntry) s.instructors = [{instructorId:newEntry.instructor_id, role:newEntry.role, amount:newEntry.amount, status:newEntry.status, note:newEntry.note||'', _rowId:newEntry.id}];
     }
-    if(s.studentPaymentId){
+    if(studentIds.length && !s.studentPaymentId && !isRecovery){
+      // Se está asignando alumno por primera vez a un horario que estaba Disponible: genera reserva + cobro ahora.
+      const primaryFamily = getStudent(studentIds[0]).familyId;
+      const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+      const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:editSessionId, tipo:'particular', status:'Confirmada'}))).select();
+      (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+      const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id:primaryFamily, student_id:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, status:'Pendiente'}).select().single();
+      if(!payErr && payRow){
+        await sb.from('sessions').update({student_payment_id: payRow.id}).eq('id', editSessionId);
+        const payment = mapPaymentRow(payRow);
+        mockData.payments.push(payment);
+        s.studentPaymentId = payment.id;
+      }
+    } else if(s.studentPaymentId){
       await sb.from('payments').update({amount:studentAmount, concept:`Clase particular — ${fmtDate(date)}`}).eq('id', s.studentPaymentId);
       const pay = mockData.payments.find(p=>p.id===s.studentPaymentId);
       if(pay){ pay.amount = studentAmount; pay.concept = `Clase particular — ${fmtDate(date)}`; }
     }
-    s.date=date; s.start=start; s.end=endHour; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count;
+    s.date=date; s.start=start; s.end=endHour; s.duration=duration; s.locationId=locationId; s.studentIds=studentIds; s.participantsCount=count; s.status=newStatus;
     if(sessionInstructorEntries(s)[0]){ sessionInstructorEntries(s)[0].instructorId = instructorId; sessionInstructorEntries(s)[0].amount = insAmount; }
     s.studentAmount = studentAmount;
     closeModal();
-    toast('Sesión particular actualizada.');
+    toast(newStatus==='Disponible' ? 'Horario actualizado — sigue disponible para reservar.' : 'Sesión particular actualizada.');
     renderView(state.view);
     return;
   }
 
   const { data: sessRow, error: sessErr } = await sb.from('sessions').insert({
-    group_id: null, date, start_time: start, end_time: endHour, location_id: locationId,
-    status: 'Programada', type: 'particular', participants_count: count,
+    group_id: null, date, start_time: start, end_time: endHour, duration_minutes: duration, location_id: locationId,
+    status: willBeAvailable ? 'Disponible' : 'Programada', type: 'particular', participants_count: count,
     student_amount: isRecovery ? 0 : studentAmount,
     is_recovery_session: isRecovery, recovery_for_student_id: isRecovery ? recovery.studentId : null,
   }).select().single();
   if(sessErr){ toast('Error al crear la sesión: '+sessErr.message); return; }
   const id = sessRow.id;
   const { data: insEntry } = await sb.from('session_instructors').insert({session_id:id, instructor_id:instructorId, amount:insAmount, role:'Principal', status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}).select().single();
-  await sb.from('session_students').insert(studentIds.map(sid=>({session_id:id, student_id:sid})));
-  const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada'}))).select();
 
   const sessionData = mapSessionRow(sessRow);
-  sessionData.studentIds = studentIds;
   sessionData.instructors = insEntry ? [{instructorId:insEntry.instructor_id, role:insEntry.role, amount:insEntry.amount, status:insEntry.status, note:insEntry.note||'', _rowId:insEntry.id}] : [];
   mockData.sessions.push(sessionData);
-  (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+
+  if(studentIds.length){
+    await sb.from('session_students').insert(studentIds.map(sid=>({session_id:id, student_id:sid})));
+    const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada'}))).select();
+    sessionData.studentIds = studentIds;
+    (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+  }
 
   if(isRecovery){
     await sb.from('recoveries').update({status:'Agendada', assigned_session_id:id}).eq('id', recovery.id);
@@ -3218,6 +3406,8 @@ async function confirmNewParticular(editSessionId){
     recovery.assignedSessionId = id;
     recoveryContext = null;
     toast('Sesión de recuperación creada y agendada, sin costo.');
+  } else if(willBeAvailable){
+    toast('Horario publicado como Disponible. Los apoderados y riders podrán reservarlo desde su cuenta.');
   } else {
     const primaryFamily = getStudent(studentIds[0]).familyId;
     const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
@@ -3660,7 +3850,7 @@ function renderInicioApoderado(){
           <div class="card-flat" style="margin-bottom:10px;">
             <div class="eyebrow" style="margin-bottom:6px;">Próxima clase</div>
             <div style="font-weight:700;">${fmtDateLong(next.date)}</div>
-            <div class="cell-muted">${next.start}–${next.end} · ${getLocation(next.locationId)?.name}</div>
+            <div class="cell-muted">${next.start}–${next.end} · ${getLocation(next.locationId)?.name || 'Sin locación'}</div>
             <div class="cell-muted">Instructor: ${sessionInstructorNames(next)}</div>
           </div>` : `<div class="cell-muted" style="margin-bottom:10px;">Sin próxima clase agendada.</div>`}
         ${owes ? `<span class="badge badge-warning">Tienes un pago pendiente</span>` : `<span class="badge badge-success">Al día con los pagos</span>`}
@@ -3762,7 +3952,7 @@ function openApoderadoGroupSearchModal(childId){
       const ageOk = age>=g.ageMin && age<=g.ageMax;
       return `<div class="card-flat" style="margin-bottom:10px;">
         <div style="font-weight:700;font-size:13.5px;">${g.name} ${ageOk?'<span class="badge badge-success" style="margin-left:6px;">Compatible</span>':'<span class="badge badge-warning" style="margin-left:6px;">Fuera de rango de edad</span>'}</div>
-        <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name}</div>
+        <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name || 'Sin locación'}</div>
         <div class="cell-muted">${fmtMoney(g.tariff)} / mes · ${g.transferPlan} · ${occ}/${g.capacity} cupos</div>
         <button class="btn btn-sm ${full?'btn-secondary':'btn-primary'}" style="margin-top:8px;" ${full?'disabled':''} onclick="apoderadoReserveGroup('${activeChild.id}','${g.id}')">${full?'Sin cupo':'Reservar cupo'}</button>
       </div>`;
@@ -3987,6 +4177,76 @@ async function confirmApoderadoParticular(){
   renderView(state.view);
 }
 
+function renderClasesDisponiblesApoderado(){
+  const kids = familyChildren();
+  const available = mockData.sessions.filter(s=>s.type==='particular' && s.status==='Disponible' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  return `
+  <div class="page-head"><div><h1>Clases disponibles</h1><div class="page-sub">Horarios particulares publicados por Nico — reserva los que te acomoden</div></div></div>
+  <div class="form-group"><label class="form-label">¿Quién participará?</label>
+    <div class="form-radio-group" id="cd-students">
+      ${kids.map((k,i)=>`<button type="button" class="chip-option ${i===0?'selected':''}" data-student-id="${k.id}" onclick="this.classList.toggle('selected')">${k.name}</button>`).join('') || '<span class="cell-muted">No tienes personas registradas todavía.</span>'}
+    </div>
+  </div>
+  <div style="margin-bottom:14px;">
+    ${available.length ? available.map(s=>availableSlotCardHtml(s)).join('') : `<div class="card">${emptyMini('No hay horarios disponibles por ahora')}</div>`}
+  </div>
+  ${available.length ? `<button class="btn btn-primary" onclick="confirmClaimAvailableSlots()">Reservar seleccionadas</button>` : ''}
+  `;
+}
+function availableSlotCardHtml(s){
+  const loc = getLocation(s.locationId);
+  const price = s.studentAmount || particularPriceFor(1);
+  return `<label class="card-flat" style="display:flex;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;">
+    <input type="checkbox" class="cd-slot-check" data-session-id="${s.id}" style="width:18px;height:18px;flex-shrink:0;">
+    <div style="flex:1;">
+      <div style="font-weight:700;">${fmtDateLong(s.date)} · ${s.start}–${s.end}</div>
+      <div class="cell-muted" style="font-size:12.5px;">${sessionInstructorNames(s)} · ${loc?.name || 'Sin locación'}</div>
+    </div>
+    <div style="font-weight:700;white-space:nowrap;">${fmtMoney(price)}</div>
+  </label>`;
+}
+async function confirmClaimAvailableSlots(){
+  const studentIds = [...document.querySelectorAll('#cd-students .chip-option.selected')].map(b=>b.dataset.studentId);
+  const sessionIds = [...document.querySelectorAll('.cd-slot-check:checked')].map(c=>c.dataset.sessionId);
+  if(!studentIds.length){ toast('Selecciona quién participará.'); return; }
+  if(!sessionIds.length){ toast('Selecciona al menos un horario para reservar.'); return; }
+  let claimed = 0, failed = 0;
+  for(const sessionId of sessionIds){
+    const s = getSession(sessionId);
+    if(!s || s.status!=='Disponible'){ failed++; continue; }
+    const count = studentIds.length;
+    const studentAmount = s.studentAmount || particularPriceFor(count);
+    const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+    const primaryFamily = getStudent(studentIds[0]).familyId;
+    if(isRealId(sessionId)){
+      const { data: updRows, error: updErr } = await sb.from('sessions').update({status:'Programada', participants_count:count, student_amount:studentAmount}).eq('id', sessionId).eq('status','Disponible').select();
+      if(updErr || !updRows || !updRows.length){ failed++; continue; }
+      await sb.from('session_students').insert(studentIds.map(sid=>({session_id:sessionId, student_id:sid})));
+      const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:sessionId, tipo:'particular', status:'Confirmada'}))).select();
+      (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+      const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id:primaryFamily, student_id:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(s.date)}`, period:s.date.slice(0,7), amount:studentAmount, status:'Pendiente'}).select().single();
+      if(!payErr && payRow){
+        await sb.from('sessions').update({student_payment_id:payRow.id}).eq('id', sessionId);
+        const payment = mapPaymentRow(payRow);
+        mockData.payments.push(payment);
+        s.studentPaymentId = payment.id;
+      }
+      s.status='Programada'; s.studentIds=studentIds; s.participantsCount=count; s.studentAmount=studentAmount;
+    } else {
+      studentIds.forEach(sid=>{
+        mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId:sid, sessionId, tipo:'particular', status:'Confirmada', createdAt:todayISO()});
+      });
+      const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:primaryFamily, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(s.date)}`, period:s.date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
+      mockData.payments.push(payment);
+      s.status='Programada'; s.studentIds=studentIds; s.participantsCount=count; s.studentAmount=studentAmount; s.studentPaymentId=payment.id;
+    }
+    claimed++;
+  }
+  if(claimed) toast(`${claimed} clase(s) reservada(s). Se generó el cobro pendiente.`);
+  if(failed) toast(`${failed} horario(s) ya no estaban disponibles (alguien más los tomó).`);
+  renderView(state.view);
+}
+
 function renderMisClasesApoderado(){
   const kids = familyChildren();
   const kidIds = kids.map(k=>k.id);
@@ -4099,7 +4359,7 @@ function renderHistorialApoderado(){
   <div class="page-head"><div><h1>Historial</h1><div class="page-sub">Sesiones pasadas y programadas</div></div></div>
   ${childSwitcherHtml(activeChild.id, 'setApoderadoHistorialChild')}
   <div class="table-wrap">
-    ${events.map(ev=>`<div class="session-list-item" style="cursor:default;"><div class="sl-time">${fmtDate(ev.date)}</div><div class="sl-info"><div class="sl-title">${getGroup(ev.groupId)?.name || 'Particular'}</div><div class="sl-meta">${ev.start} · ${sessionInstructorNames(ev)} · ${getLocation(ev.locationId)?.name}</div></div>${ev.status==='Suspendida'?'<span class="badge badge-danger">Suspendida</span>':ev.status==='Realizada'?'<span class="badge badge-success">Realizada</span>':'<span class="badge badge-info">Programada</span>'}</div>`).join('') || `<div class="cell-muted" style="padding:14px;">Sin historial de sesiones.</div>`}
+    ${events.map(ev=>`<div class="session-list-item" style="cursor:default;"><div class="sl-time">${fmtDate(ev.date)}</div><div class="sl-info"><div class="sl-title">${getGroup(ev.groupId)?.name || 'Particular'}</div><div class="sl-meta">${ev.start} · ${sessionInstructorNames(ev)} · ${getLocation(ev.locationId)?.name || 'Sin locación'}</div></div>${ev.status==='Suspendida'?'<span class="badge badge-danger">Suspendida</span>':ev.status==='Realizada'?'<span class="badge badge-success">Realizada</span>':'<span class="badge badge-info">Programada</span>'}</div>`).join('') || `<div class="cell-muted" style="padding:14px;">Sin historial de sesiones.</div>`}
   </div>`;
 }
 function setApoderadoHistorialChild(childId){ state.apoderadoHistorialChildId = childId; renderView('historial-apoderado'); }
@@ -4309,6 +4569,38 @@ async function confirmAddObservation(){
   closeModal();
   toast('Observación guardada.');
   renderView(state.view);
+}
+
+function renderMisPagosInstructor(){
+  const rows = instructorPayrollRows(state.instructorId);
+  const totals = instructorTotals(state.instructorId);
+  return `
+  <div class="page-head"><div><h1>Mis pagos</h1><div class="page-sub">Tus clases realizadas y el estado de tu pago — solo Nico puede marcar un pago como realizado</div></div></div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:18px;">
+    <div class="card-flat">
+      <div class="cell-muted" style="font-size:12px;">Pendiente</div>
+      <div style="font-weight:800;font-size:20px;color:var(--warning);">${fmtMoney(totals.pendiente)}</div>
+    </div>
+    <div class="card-flat">
+      <div class="cell-muted" style="font-size:12px;">Pagado</div>
+      <div style="font-weight:800;font-size:20px;color:var(--success);">${fmtMoney(totals.pagado)}</div>
+    </div>
+    <div class="card-flat">
+      <div class="cell-muted" style="font-size:12px;">Clases realizadas</div>
+      <div style="font-weight:800;font-size:20px;">${totals.count}</div>
+    </div>
+  </div>
+  <div class="table-wrap"><table><thead><tr><th>Fecha</th><th>Grupo/Servicio</th><th>Rol</th><th>Nota</th><th>Monto</th><th>Estado</th></tr></thead><tbody>
+    ${rows.map(r=>`<tr>
+      <td class="cell-muted">${fmtDate(r.session.date)}</td>
+      <td class="cell-muted">${getGroup(r.session.groupId)?.name || 'Clase particular'}</td>
+      <td><span class="badge badge-neutral">${r.entry.role}</span></td>
+      <td class="cell-muted">${r.entry.note||'—'}</td>
+      <td style="font-weight:700;">${fmtMoney(r.entry.amount)}</td>
+      <td>${payrollBadge(r.entry.status)}</td>
+    </tr>`).join('') || `<tr><td colspan="6"><div class="cell-muted" style="padding:14px;">Aún no tienes clases realizadas registradas.</div></td></tr>`}
+  </tbody></table></div>
+  `;
 }
 
 
@@ -4815,6 +5107,7 @@ const VIEW_RENDERERS = {
   inicio: renderInicioApoderado,
   'mis-hijos': renderMisHijos,
   reservar: renderReservarApoderado,
+  'clases-disponibles': renderClasesDisponiblesApoderado,
   'mis-clases': renderMisClasesApoderado,
   recuperaciones: renderRecuperacionesApoderado,
   'pagos-apoderado': renderPagosApoderado,
@@ -4825,6 +5118,7 @@ const VIEW_RENDERERS = {
   'alumnos-instructor': renderAlumnosInstructor,
   'asistencia-instructor': renderAsistenciaInstructor,
   'observaciones-instructor': renderObservacionesInstructor,
+  'mis-pagos-instructor': renderMisPagosInstructor,
   comunicacion: renderComunicacion,
   reportes: renderReportes,
   configuracion: renderConfiguracion,
