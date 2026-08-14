@@ -1112,6 +1112,14 @@ function mapInstructorRow(row){
   return { id: row.id, name: row.name, role: row.role || 'Instructor', phone: row.phone || '', color: row.color || '#ff6a00', active: !!row.active, ratePerClass: row.rate_per_class || 0 };
 }
 function hhmm(t){ return t ? String(t).slice(0,5) : ''; }
+function minutesBetween(startHHMM, endHHMM){
+  if(!startHHMM || !endHHMM) return 60;
+  const [sh,sm] = startHHMM.split(':').map(Number);
+  const [eh,em] = endHHMM.split(':').map(Number);
+  let diff = (eh*60+em) - (sh*60+sm);
+  if(diff <= 0) diff += 24*60;
+  return diff;
+}
 function mapGroupRow(row){
   return {
     id: row.id, name: row.name, level: row.level || 'Básico',
@@ -1145,6 +1153,7 @@ function mapSessionRow(row){
   return {
     id: row.id, groupId: row.group_id, date: row.date,
     start: hhmm(row.start_time), end: hhmm(row.end_time),
+    duration: minutesBetween(hhmm(row.start_time), hhmm(row.end_time)),
     locationId: row.location_id, status: row.status, type: row.type,
     studentIds: (row.session_students||[]).map(x=>x.student_id),
     instructors: (row.session_instructors||[]).map(x=>({instructorId:x.instructor_id, role:x.role, amount:x.amount, status:x.status, note:x.note||'', _rowId:x.id})),
@@ -1372,6 +1381,17 @@ function addMinutesToTime(hhmmStr, mins){
   const total = h*60+m+mins;
   const nh = Math.floor(total/60)%24, nm = total%60;
   return `${String(nh).padStart(2,'0')}:${String(nm).padStart(2,'0')}`;
+}
+function addDaysToDate(dateStr, days){
+  const d = new Date(dateStr+'T00:00:00');
+  d.setDate(d.getDate()+days);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function dayOfWeekLabel(dateStr){
+  if(!dateStr) return '';
+  const d = new Date(dateStr+'T00:00:00');
+  const label = d.toLocaleDateString('es-CL', {weekday:'long'});
+  return label.charAt(0).toUpperCase()+label.slice(1);
 }
 function openGenerateSessionsModal(groupId){
   const g = getGroup(groupId);
@@ -3234,7 +3254,7 @@ function openNewParticularModal(editSessionId){
       ${!isRecovery ? `<div class="form-hint" style="margin-top:6px;">Si no seleccionas ningún alumno, la clase queda publicada como <strong>Disponible</strong> para que un apoderado o rider la reserve más adelante.</div>` : ''}
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="np-date" value="${editing?editing.date:todayISO()}"></div>
+      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="np-date" value="${editing?editing.date:todayISO()}" oninput="document.getElementById('np-date-day').textContent = dayOfWeekLabel(this.value)"><div class="form-hint" id="np-date-day" style="margin-top:4px;">${dayOfWeekLabel(editing?editing.date:todayISO())}</div></div>
       <div class="form-group"><label class="form-label">Horario</label><input class="form-input" type="time" id="np-time" value="${editing?editing.start:'16:00'}"></div>
       <div class="form-group"><label class="form-label">Duración (min)</label><input class="form-input" type="number" step="15" min="15" id="np-duration" value="${editing?(editing.duration||60):60}"></div>
     </div>
@@ -3247,6 +3267,19 @@ function openNewParticularModal(editSessionId){
       <div class="form-group"><label class="form-label">Monto a cobrar al alumno</label><input class="form-input" type="number" step="1000" id="np-student-amount" ${isRecovery?'disabled':''} value="${isRecovery?0:(editing?(editing.studentAmount ?? particularPriceFor(editing.participantsCount||1)):particularPriceFor(selectedIds.length||1))}"></div>
     </div>
     <div class="form-hint">Tarifa referencial al alumno según cantidad de participantes: 1 = ${fmtMoney(PARTICULAR_PRICING[1])} · 2 = ${fmtMoney(PARTICULAR_PRICING[2])} · 3 = ${fmtMoney(PARTICULAR_PRICING[3])} · 4 = ${fmtMoney(PARTICULAR_PRICING[4])}. Ambos montos son editables para casos particulares. El sistema valida que el instructor y la locación no tengan otra sesión en el mismo horario.</div>
+    ${(!editing && !isRecovery) ? `
+    <div class="form-group"><label class="form-label">Repetir semanalmente</label>
+      <select class="form-select" id="np-repeat-weeks">
+        <option value="1">Solo esta clase</option>
+        <option value="2">2 semanas seguidas</option>
+        <option value="3">3 semanas seguidas</option>
+        <option value="4">4 semanas seguidas</option>
+        <option value="6">6 semanas seguidas</option>
+        <option value="8">8 semanas seguidas</option>
+        <option value="12">12 semanas seguidas</option>
+      </select>
+      <div class="form-hint" style="margin-top:6px;">Crea la clase el mismo día de la semana y horario durante varias semanas seguidas (mismo instructor, locación y alumno(s), si corresponde). Si alguna fecha ya tiene otra sesión en ese horario, esa fecha se salta y el resto se crea igual.</div>
+    </div>` : ''}
   `;
   const foot = `<button class="btn btn-secondary" onclick="closeModal();recoveryContext=null;">Cancelar</button><button class="btn btn-primary" onclick="confirmNewParticular(${editing?`'${editSessionId}'`:'null'})">${editing?'Guardar cambios':'Guardar'}</button>`;
   openModal({title: editing?'Editar sesión particular':'Nueva clase particular', sub: isRecovery ? 'Sesión de recuperación' : '', bodyHtml:body, footHtml:foot});
@@ -3270,13 +3303,17 @@ async function confirmNewParticular(editSessionId){
   const insAmount = parseInt(document.getElementById('np-amount').value) || getInstructor(instructorId).ratePerClass;
   const studentAmount = isRecovery ? 0 : (parseInt(document.getElementById('np-student-amount').value) || particularPriceFor(count||1));
   const willBeAvailable = !isRecovery && count===0;
+  const endHour = addMinutesToTime(start, duration);
+  const repeatWeeks = (!editSessionId && !isRecovery) ? Math.max(1, Math.min(26, parseInt(document.getElementById('np-repeat-weeks')?.value)||1)) : 1;
+  const dates = editSessionId ? [date] : Array.from({length:repeatWeeks}, (_,w)=>addDaysToDate(date, w*7));
 
-  const clash = mockData.sessions.some(s=>s.id!==editSessionId && s.date===date && s.start===start && (s.status==='Programada'||s.status==='Disponible') && (sessionInstructorEntries(s).some(e=>e.instructorId===instructorId) || s.locationId===locationId));
-  if(clash){
+  function hasClashOn(d){
+    return mockData.sessions.some(s=>s.id!==editSessionId && s.date===d && s.start===start && (s.status==='Programada'||s.status==='Disponible') && (sessionInstructorEntries(s).some(e=>e.instructorId===instructorId) || s.locationId===locationId));
+  }
+  if(dates.length===1 && hasClashOn(dates[0])){
     toast('⚠️ El instructor o la locación ya tienen una sesión en ese horario. Elige otra combinación.');
     return;
   }
-  const endHour = addMinutesToTime(start, duration);
 
   if(!willWriteReal){
     // ---- Comportamiento 100% mock, sin tocar Supabase (demo o edición de sesión de prueba) ----
@@ -3307,25 +3344,35 @@ async function confirmNewParticular(editSessionId){
       renderView(state.view);
       return;
     }
-    const id = 'S'+Math.floor(200+Math.random()*700);
-    const sessionData = {id, groupId:null, date, start, end:endHour, duration, instructors:[{instructorId, role:'Principal', amount:insAmount, status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}], locationId, status: willBeAvailable?'Disponible':'Programada', type:'particular', studentIds, participantsCount:count, studentAmount: isRecovery?0:studentAmount, studentPaymentId:null};
-    mockData.sessions.push(sessionData);
-    studentIds.forEach(studentId=>{
-      mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada', createdAt:'2026-08-11'});
+    let createdCount = 0, skippedCount = 0;
+    dates.forEach((d, idx)=>{
+      if(dates.length>1 && hasClashOn(d)){ skippedCount++; return; }
+      const id = 'S'+Math.floor(200+Math.random()*700)+idx;
+      const sessionData = {id, groupId:null, date:d, start, end:endHour, duration, instructors:[{instructorId, role:'Principal', amount:insAmount, status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}], locationId, status: willBeAvailable?'Disponible':'Programada', type:'particular', studentIds, participantsCount:count, studentAmount: isRecovery?0:studentAmount, studentPaymentId:null};
+      mockData.sessions.push(sessionData);
+      studentIds.forEach(studentId=>{
+        mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800)+idx, studentId, sessionId:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada', createdAt:todayISO()});
+      });
+      if(isRecovery){
+        recovery.status = 'Agendada';
+        recovery.assignedSessionId = id;
+        recoveryContext = null;
+      } else if(!willBeAvailable){
+        const primaryFamily = getStudent(studentIds[0]).familyId;
+        const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+        const payment = {id:'P'+Math.floor(100+Math.random()*800)+idx, familyId:primaryFamily, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(d)}`, period:d.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
+        mockData.payments.push(payment);
+        sessionData.studentPaymentId = payment.id;
+      }
+      createdCount++;
     });
     if(isRecovery){
-      recovery.status = 'Agendada';
-      recovery.assignedSessionId = id;
-      recoveryContext = null;
       toast('Sesión de recuperación creada y agendada, sin costo.');
+    } else if(dates.length>1){
+      toast(`${createdCount} clase(s) creada(s)${skippedCount?`, ${skippedCount} omitida(s) por cruce de horario`:''}.`);
     } else if(willBeAvailable){
       toast('Horario publicado como Disponible.');
     } else {
-      const primaryFamily = getStudent(studentIds[0]).familyId;
-      const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
-      const payment = {id:'P'+Math.floor(100+Math.random()*800), familyId:primaryFamily, studentId:studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`, period:date.slice(0,7), amount:studentAmount, date:null, method:null, status:'Pendiente', receipt:null};
-      mockData.payments.push(payment);
-      sessionData.studentPaymentId = payment.id;
       toast('Reserva particular confirmada. Se generó el cobro pendiente al apoderado.');
     }
     closeModal();
@@ -3339,7 +3386,7 @@ async function confirmNewParticular(editSessionId){
     if(s.status==='Programada' && willBeAvailable){ toast('Esta sesión ya tiene alumno y cobro asociado — usa "Suspender" o elimínala en vez de vaciarla.'); return; }
     const newStatus = willBeAvailable ? 'Disponible' : 'Programada';
     const { error: updErr } = await sb.from('sessions').update({
-      date, start_time: start, end_time: endHour, duration_minutes: duration, location_id: locationId,
+      date, start_time: start, end_time: endHour, location_id: locationId,
       participants_count: count, student_amount: studentAmount, status: newStatus,
     }).eq('id', editSessionId);
     if(updErr){ toast('Error al guardar: '+updErr.message); return; }
@@ -3379,48 +3426,60 @@ async function confirmNewParticular(editSessionId){
     return;
   }
 
-  const { data: sessRow, error: sessErr } = await sb.from('sessions').insert({
-    group_id: null, date, start_time: start, end_time: endHour, duration_minutes: duration, location_id: locationId,
-    status: willBeAvailable ? 'Disponible' : 'Programada', type: 'particular', participants_count: count,
-    student_amount: isRecovery ? 0 : studentAmount,
-    is_recovery_session: isRecovery, recovery_for_student_id: isRecovery ? recovery.studentId : null,
-  }).select().single();
-  if(sessErr){ toast('Error al crear la sesión: '+sessErr.message); return; }
-  const id = sessRow.id;
-  const { data: insEntry } = await sb.from('session_instructors').insert({session_id:id, instructor_id:instructorId, amount:insAmount, role:'Principal', status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}).select().single();
+  let createdCount = 0, skippedCount = 0, lastError = null;
+  for(const d of dates){
+    if(dates.length>1 && hasClashOn(d)){ skippedCount++; continue; }
+    const { data: sessRow, error: sessErr } = await sb.from('sessions').insert({
+      group_id: null, date: d, start_time: start, end_time: endHour, location_id: locationId,
+      status: willBeAvailable ? 'Disponible' : 'Programada', type: 'particular', participants_count: count,
+      student_amount: isRecovery ? 0 : studentAmount,
+      is_recovery_session: isRecovery, recovery_for_student_id: isRecovery ? recovery.studentId : null,
+    }).select().single();
+    if(sessErr){ lastError = sessErr; continue; }
+    const id = sessRow.id;
+    const { data: insEntry } = await sb.from('session_instructors').insert({session_id:id, instructor_id:instructorId, amount:insAmount, role:'Principal', status:'Pendiente', note: isRecovery?'Sesión de recuperación':'Clase particular'}).select().single();
 
-  const sessionData = mapSessionRow(sessRow);
-  sessionData.instructors = insEntry ? [{instructorId:insEntry.instructor_id, role:insEntry.role, amount:insEntry.amount, status:insEntry.status, note:insEntry.note||'', _rowId:insEntry.id}] : [];
-  mockData.sessions.push(sessionData);
+    const sessionData = mapSessionRow(sessRow);
+    sessionData.instructors = insEntry ? [{instructorId:insEntry.instructor_id, role:insEntry.role, amount:insEntry.amount, status:insEntry.status, note:insEntry.note||'', _rowId:insEntry.id}] : [];
+    mockData.sessions.push(sessionData);
 
-  if(studentIds.length){
-    await sb.from('session_students').insert(studentIds.map(sid=>({session_id:id, student_id:sid})));
-    const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada'}))).select();
-    sessionData.studentIds = studentIds;
-    (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+    if(studentIds.length){
+      await sb.from('session_students').insert(studentIds.map(sid=>({session_id:id, student_id:sid})));
+      const { data: bookRows } = await sb.from('bookings').insert(studentIds.map(sid=>({student_id:sid, session_id:id, tipo: isRecovery?'recuperación':'particular', status:'Confirmada'}))).select();
+      sessionData.studentIds = studentIds;
+      (bookRows||[]).forEach(b=>mockData.bookings.push(mapBookingRow(b)));
+    }
+
+    if(isRecovery){
+      await sb.from('recoveries').update({status:'Agendada', assigned_session_id:id}).eq('id', recovery.id);
+      recovery.status = 'Agendada';
+      recovery.assignedSessionId = id;
+      recoveryContext = null;
+    } else if(!willBeAvailable){
+      const primaryFamily = getStudent(studentIds[0]).familyId;
+      const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
+      const { data: payRow, error: payErr } = await sb.from('payments').insert({
+        family_id: primaryFamily, student_id: studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(d)}`,
+        period: d.slice(0,7), amount: studentAmount, status:'Pendiente',
+      }).select().single();
+      if(!payErr && payRow){
+        await sb.from('sessions').update({student_payment_id: payRow.id}).eq('id', id);
+        const payment = mapPaymentRow(payRow);
+        mockData.payments.push(payment);
+        sessionData.studentPaymentId = payment.id;
+      }
+    }
+    createdCount++;
   }
-
-  if(isRecovery){
-    await sb.from('recoveries').update({status:'Agendada', assigned_session_id:id}).eq('id', recovery.id);
-    recovery.status = 'Agendada';
-    recovery.assignedSessionId = id;
-    recoveryContext = null;
+  if(createdCount===0 && lastError){
+    toast('Error al crear la sesión: '+lastError.message);
+  } else if(isRecovery){
     toast('Sesión de recuperación creada y agendada, sin costo.');
+  } else if(dates.length>1){
+    toast(`${createdCount} clase(s) creada(s)${skippedCount?`, ${skippedCount} omitida(s) por cruce de horario`:''}${lastError?`. Hubo ${lastError.message?'un error en alguna':'errores en algunas'}`:''}.`);
   } else if(willBeAvailable){
     toast('Horario publicado como Disponible. Los apoderados y riders podrán reservarlo desde su cuenta.');
   } else {
-    const primaryFamily = getStudent(studentIds[0]).familyId;
-    const names = studentIds.map(sid=>getStudent(sid).name).join(', ');
-    const { data: payRow, error: payErr } = await sb.from('payments').insert({
-      family_id: primaryFamily, student_id: studentIds[0], concept:`Clase particular (${names}) — ${fmtDate(date)}`,
-      period: date.slice(0,7), amount: studentAmount, status:'Pendiente',
-    }).select().single();
-    if(!payErr && payRow){
-      await sb.from('sessions').update({student_payment_id: payRow.id}).eq('id', id);
-      const payment = mapPaymentRow(payRow);
-      mockData.payments.push(payment);
-      sessionData.studentPaymentId = payment.id;
-    }
     toast('Reserva particular confirmada. Se generó el cobro pendiente al apoderado.');
   }
   closeModal();
