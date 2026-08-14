@@ -635,6 +635,7 @@ tbody tr.clickable:hover{background:var(--bg-3);}
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script>
 /* ================================================================
    MINICHAMPS — CAPA DE DATOS MOCK
@@ -1179,6 +1180,33 @@ async function loadRealSesiones(){
   mockData.payments = [...mockData.payments, ...(payRows||[]).map(mapPaymentRow)];
 }
 
+/* ---- Finanzas: gastos operativos (los pagos ya se cargan con loadRealSesiones) ---- */
+function todayISO(){ return new Date().toISOString().slice(0,10); }
+function mapExpenseRow(row){ return { id: row.id, date: row.date, category: row.category, desc: row.description || '', amount: row.amount, method: row.method || '', provider: row.provider || '', receipt: row.receipt || null }; }
+async function loadRealFinanzas(){
+  const { data, error } = await sb.from('expenses').select('*');
+  if(error){ console.error('Error cargando gastos:', error.message); return; }
+  mockData.expenses = [...mockData.expenses, ...(data||[]).map(mapExpenseRow)];
+}
+
+/* ---- Observaciones de instructor + historial de cambios de grupo: se
+   cargan (solo lectura de lo ya existente, las nuevas se siguen sumando
+   localmente al crearlas) para que sobrevivan a un refresh de página —
+   sin esto, una observación real quedaba solo en memoria hasta la próxima
+   recarga y desaparecía de la ficha del alumno. ---- */
+function mapObservationRow(row){ return { id: row.id, studentId: row.student_id, sessionId: row.session_id, instructorId: row.instructor_id, date: row.date, content: row.content }; }
+function mapGroupChangeRow(row){ return { id: row.id, studentId: row.student_id, fromGroupId: row.from_group_id, toGroupId: row.to_group_id, date: row.date, reason: row.reason }; }
+async function loadRealHistorial(){
+  const [{ data: obsRows, error: obsErr }, { data: gcRows, error: gcErr }] = await Promise.all([
+    sb.from('observations').select('*'),
+    sb.from('group_change_log').select('*'),
+  ]);
+  if(obsErr) console.error('Error cargando observaciones:', obsErr.message);
+  if(gcErr) console.error('Error cargando historial de grupos:', gcErr.message);
+  mockData.observations = [...mockData.observations, ...(obsRows||[]).map(mapObservationRow)];
+  mockData.groupChangeLog = [...mockData.groupChangeLog, ...(gcRows||[]).map(mapGroupChangeRow)];
+}
+
 /* ---- Generar próximas sesiones de un grupo real ----
    Botón manual en la tarjeta del grupo: calcula las próximas N fechas
    según el día/horario habitual del grupo (usando la fecha real de hoy,
@@ -1265,7 +1293,7 @@ async function enterAppFromProfile(profile, authUser){
   state.instructorId = profile.instructor_id || null;
   state.userName = profile.full_name || authUser.email;
 
-  await Promise.all([loadRealAlumnosFamilias(), loadRealOperacion(), loadRealSesiones()]);
+  await Promise.all([loadRealAlumnosFamilias(), loadRealOperacion(), loadRealSesiones(), loadRealFinanzas(), loadRealHistorial()]);
 
   if(state.role==='apoderado') state.apoderadoActiveChildId = studentsOfFamily(state.apoderadoFamilyId)[0]?.id || null;
   if(state.role==='instructor') state.calendarFilters.instructor = state.instructorId;
@@ -3478,9 +3506,14 @@ function renderCobrosTab(){
   `;
 }
 
-function registerFamilyCollection(familyId){
+async function registerFamilyCollection(familyId){
   const owed = mockData.payments.filter(p=>p.familyId===familyId && ['Pendiente','Vencido'].includes(p.status));
-  owed.forEach(p=>{ p.status='Pagado'; p.date = p.date || '2026-08-11'; p.method = p.method || 'Efectivo'; });
+  for(const p of owed){
+    const date = p.date || todayISO();
+    const method = p.method || 'Efectivo';
+    p.status='Pagado'; p.date = date; p.method = method;
+    if(isRealId(p.id)) await sb.from('payments').update({status:'Pagado', paid_date:date, method}).eq('id', p.id);
+  }
   toast(`Cobro registrado para ${getFamily(familyId).apoderado}.`);
   renderView('finanzas');
 }
@@ -3529,21 +3562,27 @@ function renderInstructorPayrollTab(){
   `;
 }
 
-function approvePayment(id){
+async function approvePayment(id){
   const p = mockData.payments.find(x=>x.id===id);
-  p.status = 'Pagado'; p.date = p.date || '2026-08-11';
+  const date = p.date || todayISO();
+  p.status = 'Pagado'; p.date = date;
+  if(isRealId(id)) await sb.from('payments').update({status:'Pagado', paid_date:date}).eq('id', id);
   toast('Comprobante aprobado. Pago marcado como Pagado.');
   renderView('finanzas');
 }
-function rejectPayment(id){
+async function rejectPayment(id){
   const p = mockData.payments.find(x=>x.id===id);
   p.status = 'Rechazado';
+  if(isRealId(id)) await sb.from('payments').update({status:'Rechazado'}).eq('id', id);
   toast('Comprobante rechazado. Se notificará al apoderado.');
   renderView('finanzas');
 }
-function markPaidPayment(id){
+async function markPaidPayment(id){
   const p = mockData.payments.find(x=>x.id===id);
-  p.status = 'Pagado'; p.date = '2026-08-11'; p.method = p.method || 'Efectivo';
+  const date = todayISO();
+  const method = p.method || 'Efectivo';
+  p.status = 'Pagado'; p.date = date; p.method = method;
+  if(isRealId(id)) await sb.from('payments').update({status:'Pagado', paid_date:date, method}).eq('id', id);
   toast('Pago registrado manualmente.');
   renderView('finanzas');
 }
@@ -3551,7 +3590,7 @@ function markPaidPayment(id){
 function openAddExpenseModal(){
   const body = `
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="ex-date" value="2026-08-11"></div>
+      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="ex-date" value="${todayISO()}"></div>
       <div class="form-group"><label class="form-label">Categoría</label><select class="form-select" id="ex-cat"><option>Mantención de bicicletas</option><option>Arriendo de espacio</option><option>Insumos</option><option>Marketing</option><option>Transporte</option><option>Otro</option></select></div>
     </div>
     <div class="form-group"><label class="form-label">Descripción</label><input class="form-input" id="ex-desc" placeholder="Ej: Compra de cascos nuevos"></div>
@@ -3564,17 +3603,18 @@ function openAddExpenseModal(){
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmAddExpense()">Guardar gasto</button>`;
   openModal({title:'Agregar gasto', bodyHtml:body, footHtml:foot});
 }
-function confirmAddExpense(){
-  mockData.expenses.push({
-    id:'E'+Math.floor(100+Math.random()*800),
+async function confirmAddExpense(){
+  const payload = {
     date: document.getElementById('ex-date').value,
     category: document.getElementById('ex-cat').value,
-    desc: document.getElementById('ex-desc').value.trim() || 'Sin descripción',
+    description: document.getElementById('ex-desc').value.trim() || 'Sin descripción',
     amount: parseInt(document.getElementById('ex-amount').value)||0,
     method: document.getElementById('ex-method').value,
     provider: document.getElementById('ex-provider').value.trim() || 'No especificado',
-    receipt:null,
-  });
+  };
+  const { data, error } = await sb.from('expenses').insert(payload).select().single();
+  if(error){ toast('Error al guardar el gasto: '+error.message); return; }
+  mockData.expenses.push(mapExpenseRow(data));
   closeModal();
   toast('Gasto registrado. Resultado del período actualizado.');
   renderView('finanzas');
@@ -4233,7 +4273,7 @@ function renderAsistenciaInstructor(){
 }
 
 function renderObservacionesInstructor(){
-  const obs = mockData.observations.filter(o=>o.instructorId===state.instructorId).sort((a,b)=>b.date.localeCompare(a.date));
+  const obs = mockData.observations.filter(o=>o.instructorId===state.instructorId).sort((a,b)=>(b.date||'').localeCompare(a.date||''));
   return `
   <div class="page-head">
     <div><h1>Observaciones</h1><div class="page-sub">${obs.length} observación(es) registradas por ti</div></div>
@@ -4255,11 +4295,17 @@ function openAddObservationModal(){
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmAddObservation()">Guardar</button>`;
   openModal({title:'Nueva observación', bodyHtml:body, footHtml:foot});
 }
-function confirmAddObservation(){
+async function confirmAddObservation(){
   const studentId = document.getElementById('obs-student').value;
   const content = document.getElementById('obs-content').value.trim();
   if(!content){ toast('Escribe una observación.'); return; }
-  mockData.observations.push({id:'O'+Math.random().toString(36).slice(2,7), studentId, sessionId:null, instructorId:state.instructorId, date:'2026-08-11', content});
+  if(isRealId(studentId) && isRealId(state.instructorId)){
+    const { data, error } = await sb.from('observations').insert({student_id:studentId, instructor_id:state.instructorId, content}).select().single();
+    if(error){ toast('Error al guardar la observación: '+error.message); return; }
+    mockData.observations.push(mapObservationRow(data));
+  } else {
+    mockData.observations.push({id:'O'+Math.random().toString(36).slice(2,7), studentId, sessionId:null, instructorId:state.instructorId, date:'2026-08-11', content});
+  }
   closeModal();
   toast('Observación guardada.');
   renderView(state.view);
@@ -4488,46 +4534,263 @@ function toggleConfigField(key){
   renderView('configuracion');
 }
 
-/* ---- Importación (conceptual, sección 32 del PRD) ---- */
+/* ================================================================
+   IMPORTACIÓN — carga real de alumnos/familias desde CSV o XLSX
+   ================================================================
+   Lee el archivo de verdad (CSV con un parser propio; XLSX vía la
+   librería SheetJS), detecta sus columnas reales, deja mapearlas a los
+   campos del sistema, valida cada fila y — solo para las filas sin
+   advertencias — crea familias y alumnos reales en Supabase (dedupe
+   contra lo ya existente y contra el propio archivo, para no duplicar
+   familias cuando dos hermanos comparten apoderado). */
+const IMPORT_TARGET_FIELDS = [
+  {key:'nombre', label:'Nombre del alumno', required:true},
+  {key:'apoderado', label:'Nombre del apoderado', required:true},
+  {key:'telefono', label:'Teléfono / WhatsApp', required:false},
+  {key:'email', label:'Email', required:false},
+  {key:'nivel', label:'Nivel', required:false},
+  {key:'fecha_nacimiento', label:'Fecha de nacimiento', required:false},
+  {key:'grupo_actual', label:'Grupo actual', required:false},
+];
+let importState = { fileName:'', headers:[], dataRows:[], mapping:{}, parsed:[] };
+
+function parseCSV(text){
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for(let i=0;i<text.length;i++){
+    const c = text[i];
+    if(inQuotes){
+      if(c==='"'){ if(text[i+1]==='"'){ field+='"'; i++; } else inQuotes=false; }
+      else field += c;
+    } else {
+      if(c==='"') inQuotes = true;
+      else if(c===','){ row.push(field); field=''; }
+      else if(c==='\n'){ row.push(field); rows.push(row); row=[]; field=''; }
+      else if(c==='\r'){ /* el \n que sigue cierra la fila */ }
+      else field += c;
+    }
+  }
+  if(field.length || row.length){ row.push(field); rows.push(row); }
+  return rows.filter(r=>r.some(v=>String(v).trim()!==''));
+}
+
+function guessImportMapping(headers){
+  const norm = h => String(h).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+  const patterns = {
+    nombre: ['nombre alumno','nombre del alumno','nombre','alumno'],
+    apoderado: ['apoderado','nombre apoderado','padre','madre','tutor','representante'],
+    telefono: ['telefono','whatsapp','celular','fono','numero'],
+    email: ['email','correo'],
+    nivel: ['nivel'],
+    fecha_nacimiento: ['fecha de nacimiento','fecha_nacimiento','nacimiento','fecha nac'],
+    grupo_actual: ['grupo actual','grupo_actual','grupo'],
+  };
+  const guesses = {};
+  headers.forEach((h,idx)=>{
+    const nh = norm(h);
+    Object.entries(patterns).forEach(([key,pats])=>{
+      if(guesses[key]===undefined && pats.some(p=>nh.includes(p))) guesses[key]=idx;
+    });
+  });
+  IMPORT_TARGET_FIELDS.forEach(f=>{ if(guesses[f.key]===undefined) guesses[f.key]=-1; });
+  return guesses;
+}
+
+function parseFlexibleDate(v){
+  if(!v) return null;
+  v = String(v).trim();
+  let m = v.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if(m) return `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}`;
+  m = v.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`; // asume DD/MM/AAAA
+  return null;
+}
+
+function findExistingFamilyByNameAndPhone(name, phone){
+  const norm = s => String(s||'').trim().toLowerCase();
+  return mockData.families.find(f => norm(f.apoderado)===norm(name) && (!phone || norm(f.phone)===norm(phone) || norm(f.whatsapp)===norm(phone)));
+}
+function findExistingStudentByNameAndFamily(name, familyId){
+  const norm = s => String(s||'').trim().toLowerCase();
+  return mockData.students.find(s => norm(s.name)===norm(name) && s.familyId===familyId);
+}
+
 function openImportWizard(){
+  importState = { fileName:'', headers:[], dataRows:[], mapping:{}, parsed:[] };
   const body = `
     <div class="form-group"><label class="form-label">1. Selecciona el archivo (CSV o XLSX exportado de Google Sheets)</label>
-      <input class="form-input" type="file" id="imp-file" accept=".csv,.xlsx" onchange="handleImportFileSelected(this)">
+      <input class="form-input" type="file" id="imp-file" accept=".csv,.xlsx,.xls" onchange="handleImportFileSelected(this)">
     </div>
     <div id="imp-steps"></div>
   `;
-  openModal({title:'Importar alumnos', sub:'Paso 1 de 6 — seleccionar archivo', bodyHtml:body, wide:true});
+  openModal({title:'Importar alumnos', sub:'Paso 1 — seleccionar archivo', bodyHtml:body, wide:true});
 }
+
 function handleImportFileSelected(input){
   const file = input.files[0];
   if(!file) return;
-  const detectedColumns = ['nombre','apellido','fecha_nacimiento','apoderado','telefono','nivel','grupo_actual'];
-  const mapping = {nombre:'Nombre alumno', apellido:'Apellido alumno', fecha_nacimiento:'Fecha de nacimiento', apoderado:'Nombre apoderado', telefono:'Teléfono/WhatsApp', nivel:'Nivel', grupo_actual:'(sin mapear)'};
-  const steps = `
+  const stepsEl = document.getElementById('imp-steps');
+  stepsEl.innerHTML = `<div class="cell-muted" style="margin-top:14px;">Leyendo "${file.name}"…</div>`;
+  const isCsv = /\.csv$/i.test(file.name);
+  const reader = new FileReader();
+  reader.onerror = ()=>{ stepsEl.innerHTML = `<div class="alert severity-high" style="margin-top:14px;"><div class="alert-ic">⚠️</div><div class="alert-desc">No se pudo leer el archivo.</div></div>`; };
+  reader.onload = (e)=>{
+    let rows;
+    try {
+      if(isCsv){
+        rows = parseCSV(String(e.target.result));
+      } else {
+        const wb = XLSX.read(e.target.result, {type:'array'});
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        rows = XLSX.utils.sheet_to_json(sheet, {header:1, raw:false, defval:''});
+        rows = rows.filter(r=>r.some(v=>String(v).trim()!==''));
+      }
+    } catch(err){
+      stepsEl.innerHTML = `<div class="alert severity-high" style="margin-top:14px;"><div class="alert-ic">⚠️</div><div class="alert-desc">No se pudo leer el archivo: ${err.message}</div></div>`;
+      return;
+    }
+    if(!rows.length){ stepsEl.innerHTML = `<div class="alert severity-high" style="margin-top:14px;"><div class="alert-ic">⚠️</div><div class="alert-desc">El archivo está vacío.</div></div>`; return; }
+    importState.fileName = file.name;
+    importState.headers = rows[0].map(h=>String(h).trim());
+    importState.dataRows = rows.slice(1);
+    importState.mapping = guessImportMapping(importState.headers);
+    renderImportMappingStep();
+  };
+  if(isCsv) reader.readAsText(file); else reader.readAsArrayBuffer(file);
+}
+
+function renderImportMappingStep(){
+  const stepsEl = document.getElementById('imp-steps');
+  stepsEl.innerHTML = `
     <div class="card-flat" style="margin-top:14px;">
-      <div class="form-label">2. Columnas detectadas en "${file.name}"</div>
-      <div class="cell-muted">${detectedColumns.join(', ')}</div>
+      <div class="form-label">2. Columnas detectadas en "${importState.fileName}" (${importState.dataRows.length} fila(s))</div>
+      <div class="cell-muted">${importState.headers.join(', ')}</div>
     </div>
     <div class="card-flat" style="margin-top:10px;">
-      <div class="form-label">3. Mapeo sugerido de columnas</div>
-      ${Object.entries(mapping).map(([col,field])=>`<div class="child-info-row" style="border-top:none;padding:4px 0;"><span>${col}</span><span>→ ${field}</span></div>`).join('')}
+      <div class="form-label">3. Mapeo de columnas — revisa que esté correcto</div>
+      ${IMPORT_TARGET_FIELDS.map(f=>`
+        <div class="child-info-row" style="border-top:none;padding:4px 0;">
+          <span>${f.label}${f.required?' *':''}</span>
+          <select class="form-select" style="max-width:220px;" onchange="importState.mapping['${f.key}']=parseInt(this.value)">
+            <option value="-1" ${importState.mapping[f.key]===-1?'selected':''}>(sin mapear)</option>
+            ${importState.headers.map((h,i)=>`<option value="${i}" ${importState.mapping[f.key]===i?'selected':''}>${h}</option>`).join('')}
+          </select>
+        </div>`).join('')}
     </div>
-    <div class="alert severity-mid" style="margin-top:10px;">
-      <div class="alert-ic">⚠️</div>
-      <div><div class="alert-title">4. Se detectaron posibles problemas</div><div class="alert-desc">2 filas sin fecha de nacimiento · 1 posible duplicado (mismo nombre y teléfono) · "grupo_actual" no coincide con ningún grupo configurado</div></div>
-    </div>
+    <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="buildImportPreview()">Ver vista previa</button>
+  `;
+}
+
+function buildImportPreview(){
+  const m = importState.mapping;
+  const get = (row,key)=> m[key]>=0 && m[key]<row.length ? String(row[m[key]]||'').trim() : '';
+  const seenInFile = new Map(); // apoderado+telefono normalizado -> true, para marcar duplicados dentro del mismo archivo
+  const norm = s => String(s||'').trim().toLowerCase();
+
+  importState.parsed = importState.dataRows.map((row, i)=>{
+    const nombre = get(row,'nombre');
+    const apoderado = get(row,'apoderado');
+    const telefono = get(row,'telefono');
+    const email = get(row,'email');
+    let nivel = get(row,'nivel');
+    const nivelesValidos = ['Básico','Intermedio','Avanzado'];
+    if(!nivelesValidos.includes(nivel)) nivel = nivel ? '' : 'Básico';
+    const fechaRaw = get(row,'fecha_nacimiento');
+    const fecha = fechaRaw ? parseFlexibleDate(fechaRaw) : null;
+    const grupoNombre = get(row,'grupo_actual');
+    const grupo = grupoNombre ? mockData.groups.find(g=>isRealId(g.id) && norm(g.name)===norm(grupoNombre)) : null;
+
+    const issues = [];
+    if(!nombre) issues.push('Falta nombre del alumno');
+    if(!apoderado) issues.push('Falta nombre del apoderado');
+    if(fechaRaw && !fecha) issues.push('Fecha de nacimiento no reconocida');
+    if(get(row,'nivel') && !nivelesValidos.includes(get(row,'nivel'))) issues.push('Nivel no reconocido (Básico/Intermedio/Avanzado)');
+    if(grupoNombre && !grupo) issues.push(`Grupo "${grupoNombre}" no coincide con ningún grupo real existente`);
+
+    const dedupeKey = norm(apoderado)+'|'+norm(telefono);
+    const dupInFile = nombre && apoderado && seenInFile.has(dedupeKey+'|'+norm(nombre));
+    const existingFam = apoderado ? findExistingFamilyByNameAndPhone(apoderado, telefono) : null;
+    const dupExisting = existingFam && nombre && findExistingStudentByNameAndFamily(nombre, existingFam.id);
+    if(dupInFile) issues.push('Fila duplicada dentro del mismo archivo');
+    if(dupExisting) issues.push('Ya existe un alumno con ese nombre para ese apoderado');
+    if(nombre && apoderado) seenInFile.set(dedupeKey+'|'+norm(nombre), true);
+
+    return { rowIndex:i, nombre, apoderado, telefono, email, nivel: nivel||'Básico', fecha, grupoId: grupo?grupo.id:null, ok: issues.length===0, issues };
+  });
+
+  renderImportPreview();
+}
+
+function renderImportPreview(){
+  const stepsEl = document.getElementById('imp-steps');
+  const parsed = importState.parsed;
+  const okCount = parsed.filter(p=>p.ok).length;
+  const warnCount = parsed.length - okCount;
+  stepsEl.innerHTML = `
+    ${warnCount ? `<div class="alert severity-mid" style="margin-top:14px;"><div class="alert-ic">⚠️</div><div><div class="alert-title">${warnCount} fila(s) con advertencias</div><div class="alert-desc">No se importarán hasta que corrijas el archivo original y lo vuelvas a subir.</div></div></div>` : ''}
     <div class="card-flat" style="margin-top:10px;">
-      <div class="form-label">5. Vista previa (primeras filas)</div>
-      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Apoderado</th><th>Nivel</th><th>Estado</th></tr></thead><tbody>
-        <tr><td>Ejemplo Alumno 1</td><td>Ejemplo Apoderado 1</td><td>Básico</td><td><span class="badge badge-success">Lista para importar</span></td></tr>
-        <tr><td>Ejemplo Alumno 2</td><td>Ejemplo Apoderado 2</td><td>—</td><td><span class="badge badge-warning">Falta nivel</span></td></tr>
-        <tr><td>Ejemplo Alumno 3</td><td>Ejemplo Apoderado 1</td><td>Intermedio</td><td><span class="badge badge-danger">Posible duplicado</span></td></tr>
+      <div class="form-label">Vista previa (${parsed.length} fila(s))</div>
+      <div class="table-wrap"><table><thead><tr><th>Nombre</th><th>Apoderado</th><th>Nivel</th><th>Grupo</th><th>Estado</th></tr></thead><tbody>
+        ${parsed.map(p=>`<tr>
+          <td>${p.nombre||'—'}</td>
+          <td>${p.apoderado||'—'}</td>
+          <td>${p.nivel}</td>
+          <td>${p.grupoId?getGroup(p.grupoId)?.name:'—'}</td>
+          <td>${p.ok?'<span class="badge badge-success">Lista para importar</span>':`<span class="badge badge-danger" title="${p.issues.join('; ')}">${p.issues[0]}</span>`}</td>
+        </tr>`).join('')}
       </tbody></table></div>
     </div>
-    <div class="form-hint" style="margin-top:10px;">6. El sistema no importará automáticamente las filas con advertencias. Esta es una simulación del flujo — no se crean alumnos reales todavía en el prototipo.</div>
-    <button class="btn btn-primary btn-block" style="margin-top:14px;" onclick="closeModal();toast('Importación simulada. En la app real, aquí se crearían los registros validados.')">Confirmar importación (simulada)</button>
+    <div class="form-hint" style="margin-top:10px;">Se crearán ${okCount} alumno(s) real(es) en Supabase (agrupando hermanos bajo la misma familia cuando comparten apoderado y teléfono). Las filas con advertencia se omiten.</div>
+    <button class="btn btn-primary btn-block" style="margin-top:14px;" ${okCount?'':'disabled'} onclick="confirmImport()">Confirmar importación (${okCount})</button>
   `;
-  document.getElementById('imp-steps').innerHTML = steps;
+}
+
+async function confirmImport(){
+  const rows = importState.parsed.filter(p=>p.ok);
+  if(!rows.length) return;
+  const stepsEl = document.getElementById('imp-steps');
+  stepsEl.insertAdjacentHTML('beforeend', `<div class="cell-muted" style="margin-top:10px;">Importando…</div>`);
+
+  const batchFamilies = new Map(); // dedupeKey -> familyId real, para no crear la misma familia 2 veces dentro de esta importación
+  const norm = s => String(s||'').trim().toLowerCase();
+  let familiesCreated = 0, studentsCreated = 0, errors = 0;
+
+  for(const row of rows){
+    try {
+      let familyId;
+      const existingFam = findExistingFamilyByNameAndPhone(row.apoderado, row.telefono);
+      const dedupeKey = norm(row.apoderado)+'|'+norm(row.telefono);
+      if(existingFam){
+        familyId = existingFam.id;
+      } else if(batchFamilies.has(dedupeKey)){
+        familyId = batchFamilies.get(dedupeKey);
+      } else {
+        const { data: famRow, error: famErr } = await sb.from('families').insert({
+          apoderado_name: row.apoderado, phone: row.telefono || null, whatsapp: row.telefono || null,
+          email: row.email || null, account_type: 'apoderado',
+        }).select().single();
+        if(famErr) throw famErr;
+        mockData.families.push(mapFamilyRow(famRow));
+        familyId = famRow.id;
+        batchFamilies.set(dedupeKey, familyId);
+        familiesCreated++;
+      }
+      const { data: stuRow, error: stuErr } = await sb.from('students').insert({
+        family_id: familyId, name: row.nombre, birth: row.fecha, level: row.nivel,
+        group_id: row.grupoId, status: 'Activo', tariff_note: `Importado desde ${importState.fileName}`,
+      }).select().single();
+      if(stuErr) throw stuErr;
+      mockData.students.push(mapStudentRow(stuRow));
+      studentsCreated++;
+    } catch(err){
+      console.error('Error importando fila:', err.message);
+      errors++;
+    }
+  }
+
+  closeModal();
+  toast(`Importación completa: ${studentsCreated} alumno(s) creado(s) en ${familiesCreated} familia(s) nueva(s)${errors?`, ${errors} fila(s) con error`:''}.`);
+  if(state.view==='alumnos' || state.view==='familias' || state.view==='configuracion') renderView(state.view);
 }
 
 /* @@REPORTES_PLACEHOLDER@@ */
