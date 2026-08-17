@@ -623,7 +623,6 @@ tbody tr.clickable:hover{background:var(--bg-3);}
         <input type="text" id="globalSearch" placeholder="Buscar alumno, familia, RUT, grupo…">
       </div>
       <div class="topbar-actions">
-        <span class="demo-flag">● DATOS DE DEMOSTRACIÓN</span>
         <button class="icon-btn" title="Notificaciones">🔔<span class="dot"></span></button>
       </div>
     </header>
@@ -650,7 +649,7 @@ tbody tr.clickable:hover{background:var(--bg-3);}
    Supabase sin rediseñar la UI.
    ================================================================ */
 
-const TODAY = new Date('2026-08-11T09:00:00');
+const TODAY = new Date();
 
 function calcAge(birthISO){
   if(!birthISO) return '—';
@@ -681,148 +680,28 @@ function avatarInner(person){
   return person.photo ? `<img src="${person.photo}" style="width:100%;height:100%;object-fit:cover;border-radius:50%;">` : initials(person.name);
 }
 
+// A partir del lanzamiento real, mockData arranca vacío en cada categoría:
+// toda la información que se ve en la app se carga desde Supabase (ver las
+// funciones loadReal*() más abajo) o se crea en vivo desde la propia app.
+// Los datos ficticios de demostración que existían aquí (familias F00x,
+// alumnos A0xx, grupos G00x, instructores I00x, sesiones S1xx, etc.) fueron
+// retirados para el lanzamiento a apoderados reales.
 const mockData = {
-
-  instructors: [
-    {id:'I001', name:'Nico Prudencio', role:'Fundador / Instructor jefe', phone:'+56 9 5555 0101', color:'#ff2e93', active:true, ratePerClass:25000},
-    {id:'I002', name:'Pedro Salgado', role:'Instructor', phone:'+56 9 5555 0102', color:'#ff6a00', active:true, ratePerClass:20000},
-    {id:'I003', name:'Camila Reyes', role:'Instructora', phone:'+56 9 5555 0103', color:'#ffc400', active:true, ratePerClass:20000},
-  ],
-
-  locations: [
-    {id:'L001', name:'Parque X — Cerro El Panul', address:'Camino El Panul s/n, La Florida', maps:'https://maps.google.com', desc:'Circuito principal, singletrack de tierra.', active:true},
-    {id:'L002', name:'Parque Y — Peñalolén Bike Park', address:'Av. Grecia 9500, Peñalolén', maps:'https://maps.google.com', desc:'Pista con saltos moderados, ideal para nivel intermedio.', active:true},
-    {id:'L003', name:'Sede Champs — La Reina', address:'Príncipe de Gales 8300, La Reina', maps:'https://maps.google.com', desc:'Sede techada, taller y punto de encuentro para tours.', active:true},
-  ],
-
-  // ---- Familias / Apoderados ----
-  families: [
-    {id:'F001', apoderado:'María González', rut:'12.345.678-9', email:'maria.gonzalez@demo.cl', phone:'+56 9 6111 2201', whatsapp:'+56 9 6111 2201', address:'Los Aromos 450, La Reina', accountType:'apoderado'},
-    {id:'F002', apoderado:'Javiera Herrera', rut:'13.222.111-4', email:'javiera.herrera@demo.cl', phone:'+56 9 6111 2202', whatsapp:'+56 9 6111 2202', address:'Camino Real 220, Peñalolén'},
-    {id:'F003', apoderado:'Andrés Muñoz', rut:'11.987.654-2', email:'andres.munoz@demo.cl', phone:'+56 9 6111 2203', whatsapp:'+56 9 6111 2203', address:'Los Militares 1900, Las Condes'},
-    {id:'F004', apoderado:'Camila Rojas', rut:'14.555.222-8', email:'camila.rojas@demo.cl', phone:'+56 9 6111 2204', whatsapp:'+56 9 6111 2204', address:'Tobalaba 3800, La Reina'},
-    {id:'F005', apoderado:'Felipe Bravo', rut:'10.876.345-1', email:'felipe.bravo@demo.cl', phone:'+56 9 6111 2205', whatsapp:'+56 9 6111 2205', address:'Larraín 6700, La Reina'},
-    {id:'F006', apoderado:'Daniela Silva', rut:'15.111.888-3', email:'daniela.silva@demo.cl', phone:'+56 9 6111 2206', whatsapp:'+56 9 6111 2206', address:'Quilín 5400, Peñalolén'},
-    {id:'F007', apoderado:'Ignacio Contreras', rut:'16.444.777-6', email:'ignacio.contreras@demo.cl', phone:'+56 9 6111 2207', whatsapp:'+56 9 6111 2207', address:'Simón Bolívar 7100, Ñuñoa'},
-    {id:'F008', apoderado:'Josefina Vidal', rut:'12.999.333-7', email:'josefina.vidal@demo.cl', phone:'+56 9 6111 2208', whatsapp:'+56 9 6111 2208', address:'Barros Errázuriz 210, Las Condes'},
-    {id:'F009', apoderado:'Vicente Andrade', rut:'19.333.222-5', email:'vicente.andrade@demo.cl', phone:'+56 9 6111 2209', whatsapp:'+56 9 6111 2209', address:'Larraín 4200, La Reina', accountType:'rider'},
-  ],
-
-  // ---- Grupos (estructura estable) ----
-  groups: [
-    {id:'G001', name:'Básico 8–10', level:'Básico', ageMin:8, ageMax:10, day:'Martes', time:'17:00', duration:60, instructorIds:['I001'], locationId:'L001', capacity:6, tariff:90000, transferPlan:'Sin traslado', active:true},
-    {id:'G002', name:'Básico 9–11', level:'Básico', ageMin:9, ageMax:11, day:'Jueves', time:'18:00', duration:60, instructorIds:['I002'], locationId:'L002', capacity:6, tariff:90000, transferPlan:'Semi traslado', active:true},
-    {id:'G003', name:'Intermedio 10–13', level:'Intermedio', ageMin:10, ageMax:13, day:'Miércoles', time:'17:30', duration:75, instructorIds:['I003'], locationId:'L001', capacity:8, tariff:100000, transferPlan:'Sin traslado', active:true},
-    {id:'G004', name:'Avanzado 12–16', level:'Avanzado', ageMin:12, ageMax:16, day:'Sábado', time:'10:00', duration:90, instructorIds:['I001','I002'], locationId:'L003', capacity:6, tariff:110000, transferPlan:'Full traslado', active:true},
-  ],
-
-  // ---- Alumnos ----
-  // pricingNote: valores ficticios de demostración, no representan tarifas oficiales.
-  students: [
-    {id:'A001', familyId:'F001', name:'Martín González', birth:'2016-03-14', level:'Básico', experience:'1 año practicando, sin competencias', groupId:'G001', status:'Activo', tariff:90000, tariffNote:'Tarifa hermano 1 (completa)', emergency1:'María González / +56 9 6111 2201', emergency2:'Jorge González (abuelo) / +56 9 6111 9901', clinic:'Clínica Alemana', insurance:'Sí — Achs Escolar', waiver:true, photo:null},
-    {id:'A002', familyId:'F001', name:'Sofía González', birth:'2014-07-02', level:'Intermedio', experience:'3 años, participó en 2 rodadas escolares', groupId:'G003', status:'Activo', tariff:70000, tariffNote:'Tarifa hermano 2 (con descuento)', emergency1:'María González / +56 9 6111 2201', emergency2:'Jorge González (abuelo) / +56 9 6111 9901', clinic:'Clínica Alemana', insurance:'Sí — Achs Escolar', waiver:true, photo:null},
-    {id:'A003', familyId:'F002', name:'Tomás Herrera', birth:'2015-11-20', level:'Básico', experience:'Sin experiencia previa', groupId:'G002', status:'Activo', tariff:90000, tariffNote:'Tarifa estándar', emergency1:'Javiera Herrera / +56 9 6111 2202', emergency2:'—', clinic:'Hospital Padre Hurtado', insurance:'No declarado', waiver:true, photo:null},
-    {id:'A004', familyId:'F003', name:'Lucas Muñoz', birth:'2012-05-09', level:'Avanzado', experience:'5 años, compite en categoría local', groupId:'G004', status:'Activo', tariff:110000, tariffNote:'Tarifa estándar avanzado', emergency1:'Andrés Muñoz / +56 9 6111 2203', emergency2:'Paula Ibáñez / +56 9 6111 9902', clinic:'Clínica Las Condes', insurance:'Sí — Seguro particular', waiver:true, photo:null},
-    {id:'A005', familyId:'F004', name:'Agustín Rojas', birth:'2016-09-30', level:'Básico', experience:'8 meses de clases', groupId:'G001', status:'Activo', tariff:90000, tariffNote:'Tarifa hermano 1 (completa)', emergency1:'Camila Rojas / +56 9 6111 2204', emergency2:'—', clinic:'Clínica Santa María', insurance:'Sí — Achs Escolar', waiver:true, photo:null},
-    {id:'A006', familyId:'F004', name:'Emilia Rojas', birth:'2017-01-18', level:'Básico', experience:'Sin experiencia previa', groupId:'G001', status:'Activo', tariff:70000, tariffNote:'Tarifa hermano 2 (con descuento)', emergency1:'Camila Rojas / +56 9 6111 2204', emergency2:'—', clinic:'Clínica Santa María', insurance:'Sí — Achs Escolar', waiver:true, photo:null},
-    {id:'A007', familyId:'F005', name:'Martina Bravo', birth:'2013-12-05', level:'Intermedio', experience:'2 años, cambió desde otra escuela', groupId:'G003', status:'Activo', tariff:100000, tariffNote:'Tarifa estándar', emergency1:'Felipe Bravo / +56 9 6111 2205', emergency2:'Sandra Ortiz / +56 9 6111 9903', clinic:'Clínica Alemana', insurance:'No declarado', waiver:true, photo:null},
-    {id:'A008', familyId:'F006', name:'Joaquín Silva', birth:'2015-02-27', level:'Intermedio', experience:'1.5 años, prefiere clases particulares', groupId:null, status:'Activo', tariff:null, tariffNote:'Solo clases particulares (pack)', emergency1:'Daniela Silva / +56 9 6111 2206', emergency2:'—', clinic:'Hospital UC Christus', insurance:'Sí — Seguro particular', waiver:true, photo:null},
-    {id:'A009', familyId:'F007', name:'Renata Contreras', birth:'2016-06-11', level:'Básico', experience:'Sin experiencia previa', groupId:'G002', status:'Prospecto', tariff:90000, tariffNote:'Tarifa estándar (pendiente confirmar inscripción)', emergency1:'Ignacio Contreras / +56 9 6111 2207', emergency2:'—', clinic:'No declarada', insurance:'No declarado', waiver:false, photo:null},
-    {id:'A010', familyId:'F008', name:'Máximo Vidal', birth:'2013-04-22', level:'Avanzado', experience:'4 años, ex-alumno de otra escuela de MTB', groupId:'G004', status:'Activo', tariff:110000, tariffNote:'Tarifa estándar avanzado', emergency1:'Josefina Vidal / +56 9 6111 2208', emergency2:'Rodrigo Vidal / +56 9 6111 9904', clinic:'Clínica Indisa', insurance:'Sí — Achs Escolar', waiver:true, photo:null},
-    // Cuenta tipo "rider": Vicente reserva y paga para sí mismo, sin apoderado — su propio registro de alumno cuelga de su misma cuenta/familia.
-    {id:'A011', familyId:'F009', name:'Vicente Andrade', birth:'2007-05-10', level:'Intermedio', experience:'2 años, prefiere clases particulares los fines de semana', groupId:null, status:'Activo', tariff:null, tariffNote:'Cuenta rider — solo clases particulares', emergency1:'Vicente Andrade (cuenta propia) / +56 9 6111 2209', emergency2:'—', clinic:'No declarada', insurance:'No declarado', waiver:true, photo:null},
-  ],
-
-  // ---- Sesiones (ocurrencias concretas) ----
-  sessions: [
-    // semana actual
-    {id:'S101', groupId:'G001', date:'2026-08-11', start:'17:00', end:'18:00', instructors:[{instructorId:'I001', role:'Principal', amount:25000, status:'Pendiente', note:''}], locationId:'L001', status:'Programada', type:'grupal', studentIds:['A001','A005','A006']},
-    {id:'S102', groupId:'G003', date:'2026-08-12', start:'17:30', end:'18:45', instructors:[{instructorId:'I003', role:'Principal', amount:20000, status:'Pendiente', note:''}], locationId:'L001', status:'Programada', type:'grupal', studentIds:['A002','A007']},
-    {id:'S103', groupId:'G002', date:'2026-08-13', start:'18:00', end:'19:00', instructors:[{instructorId:'I002', role:'Principal', amount:20000, status:'Pendiente', note:''}], locationId:'L002', status:'Programada', type:'grupal', studentIds:['A003','A009']},
-    {id:'S104', groupId:null, date:'2026-08-14', start:'16:00', end:'17:00', instructors:[{instructorId:'I003', role:'Principal', amount:15000, status:'Pendiente', note:'Clase particular 1 alumno'}], locationId:'L001', status:'Programada', type:'particular', studentIds:['A008'], participantsCount:1, packId:'PK001', studentAmount:null, studentPaymentId:null},
-    {id:'S105', groupId:'G004', date:'2026-08-15', start:'10:00', end:'11:30', instructors:[{instructorId:'I001', role:'Principal', amount:30000, status:'Pendiente', note:'Incluye traslado extra a Sede La Reina'},{instructorId:'I002', role:'Ayudante', amount:15000, status:'Pendiente', note:'Apoyo como ayudante'}], locationId:'L003', status:'Programada', type:'grupal', studentIds:['A004','A010']},
-    // sesión pasada suspendida (genera recuperación)
-    {id:'S090', groupId:'G001', date:'2026-08-04', start:'17:00', end:'18:00', instructors:[{instructorId:'I001', role:'Principal', amount:0, status:'Anulado', note:'Sesión suspendida — no genera pago'}], locationId:'L001', status:'Suspendida', type:'grupal', studentIds:['A001','A005','A006'], suspendReason:'Lluvia intensa — pista en mal estado', recoverable:true},
-    // sesiones pasadas ya realizadas (para historial/asistencia)
-    {id:'S080', groupId:'G001', date:'2026-07-28', start:'17:00', end:'18:00', instructors:[{instructorId:'I001', role:'Principal', amount:25000, status:'Pagado', note:''}], locationId:'L001', status:'Realizada', type:'grupal', studentIds:['A001','A005','A006']},
-    {id:'S081', groupId:'G003', date:'2026-07-29', start:'17:30', end:'18:45', instructors:[{instructorId:'I003', role:'Principal', amount:20000, status:'Pendiente', note:''}], locationId:'L001', status:'Realizada', type:'grupal', studentIds:['A002','A007']},
-    {id:'S082', groupId:'G002', date:'2026-07-30', start:'18:00', end:'19:00', instructors:[{instructorId:'I002', role:'Principal', amount:20000, status:'Pagado', note:''}], locationId:'L002', status:'Realizada', type:'grupal', studentIds:['A003']},
-    {id:'S083', groupId:'G004', date:'2026-08-01', start:'10:00', end:'11:30', instructors:[{instructorId:'I001', role:'Principal', amount:30000, status:'Pendiente', note:'Sesión de 90 min + traslado a Sede La Reina'}], locationId:'L003', status:'Realizada', type:'grupal', studentIds:['A004','A010']},
-    // próxima recuperación agendada para Agustín Rojas
-    {id:'S110', groupId:'G001', date:'2026-08-18', start:'17:00', end:'18:00', instructors:[{instructorId:'I001', role:'Principal', amount:25000, status:'Pendiente', note:''}], locationId:'L001', status:'Programada', type:'grupal', studentIds:['A001','A005','A006'], isRecoverySession:true, recoveryForStudentId:'A005', recoveryForSessionId:'S090'},
-  ],
-
-  // ---- Reservas ----
-  bookings: [
-    {id:'B001', studentId:'A008', sessionId:'S104', tipo:'particular', status:'Confirmada', createdAt:'2026-08-06'},
-    {id:'B002', studentId:'A005', sessionId:'S110', tipo:'recuperación', status:'Confirmada', createdAt:'2026-08-05'},
-  ],
-
-  // ---- Asistencia ----
-  attendance: [
-    {id:'AT001', sessionId:'S080', studentId:'A001', status:'Presente', note:''},
-    {id:'AT002', sessionId:'S080', studentId:'A005', status:'Presente', note:''},
-    {id:'AT003', sessionId:'S080', studentId:'A006', status:'Ausente', note:'Avisó con anticipación por enfermedad'},
-    {id:'AT004', sessionId:'S081', studentId:'A002', status:'Presente', note:''},
-    {id:'AT005', sessionId:'S081', studentId:'A007', status:'Presente', note:''},
-    {id:'AT006', sessionId:'S082', studentId:'A003', status:'Presente', note:''},
-    {id:'AT007', sessionId:'S083', studentId:'A004', status:'Presente', note:''},
-    {id:'AT008', sessionId:'S083', studentId:'A010', status:'Presente', note:'Llegó 20 min tarde por autorización de apoderado'},
-  ],
-
-  // ---- Observaciones ----
-  observations: [
-    {id:'O001', studentId:'A001', sessionId:'S080', instructorId:'I001', date:'2026-07-28', content:'Buen manejo de frenos en descenso. Falta trabajar posición de pedales en curvas.'},
-    {id:'O002', studentId:'A004', sessionId:'S083', instructorId:'I001', date:'2026-08-01', content:'Listo para probar la pista intermedia de saltos la próxima sesión.'},
-    {id:'O003', studentId:'A010', sessionId:'S083', instructorId:'I001', date:'2026-08-01', content:'Buena condición física. Reforzar técnica de salto en rampa baja.'},
-  ],
-
-  // ---- Pagos ----
-  payments: [
-    {id:'P001', familyId:'F001', studentId:'A001', concept:'Mensualidad Agosto — Básico 8–10', period:'2026-08', amount:90000, date:'2026-08-03', method:'Mercado Pago', status:'Pagado', receipt:null},
-    {id:'P002', familyId:'F001', studentId:'A002', concept:'Mensualidad Agosto — Intermedio (hermano 2)', period:'2026-08', amount:70000, date:'2026-08-03', method:'Mercado Pago', status:'Pagado', receipt:null},
-    {id:'P003', familyId:'F002', studentId:'A003', concept:'Mensualidad Agosto — Básico 9–11', period:'2026-08', amount:90000, date:null, method:null, status:'Vencido', receipt:null},
-    {id:'P004', familyId:'F003', studentId:'A004', concept:'Mensualidad Agosto — Avanzado', period:'2026-08', amount:110000, date:'2026-08-02', method:'Transferencia', status:'Pagado', receipt:'comprobante_muñoz_ago.pdf'},
-    {id:'P005', familyId:'F004', studentId:'A005', concept:'Mensualidad Agosto — Básico (hermano 1)', period:'2026-08', amount:90000, date:'2026-08-04', method:'Efectivo', status:'Pagado', receipt:null},
-    {id:'P006', familyId:'F004', studentId:'A006', concept:'Mensualidad Agosto — Básico (hermano 2)', period:'2026-08', amount:70000, date:null, method:null, status:'Pendiente', receipt:null},
-    {id:'P007', familyId:'F005', studentId:'A007', concept:'Mensualidad Agosto — Intermedio', period:'2026-08', amount:100000, date:'2026-08-09', method:'Transferencia', status:'En revisión', receipt:'comprobante_bravo_ago.jpg'},
-    {id:'P008', familyId:'F006', studentId:'A008', concept:'Pack 4 clases particulares', period:'2026-08', amount:150000, date:'2026-08-01', method:'Mercado Pago', status:'Pagado', receipt:null},
-    {id:'P009', familyId:'F008', studentId:'A010', concept:'Mensualidad Agosto — Avanzado', period:'2026-08', amount:110000, date:'2026-08-05', method:'Mercado Pago', status:'Pagado', receipt:null},
-    {id:'P010', familyId:'F007', studentId:'A009', concept:'Matrícula + primera mensualidad', period:'2026-08', amount:90000, date:null, method:null, status:'Pendiente', receipt:null},
-  ],
-
-  // ---- Gastos ----
-  expenses: [
-    {id:'E001', date:'2026-08-01', category:'Mantención de bicicletas', desc:'Repuestos y ajuste de frenos flota escuela', amount:65000, method:'Transferencia', provider:'BikeShop La Reina', receipt:'factura_001.pdf'},
-    {id:'E002', date:'2026-08-03', category:'Arriendo de espacio', desc:'Arriendo mensual Sede La Reina', amount:180000, method:'Transferencia', provider:'Inmobiliaria Príncipe de Gales', receipt:'contrato_agosto.pdf'},
-    {id:'E003', date:'2026-08-06', category:'Insumos', desc:'Botiquín y agua para clases', amount:22000, method:'Efectivo', provider:'Supermercado Local', receipt:null},
-    {id:'E004', date:'2026-08-08', category:'Marketing', desc:'Diseño de flyer inscripciones', amount:35000, method:'Transferencia', provider:'Freelance Diseño', receipt:'boleta_diseno.pdf'},
-  ],
-
-  // ---- Packs de clases ----
-  packs: [
-    {id:'PK001', studentId:'A008', name:'Pack 4 clases particulares', total:4, used:1, purchaseDate:'2026-08-01', expiryDate:'2026-11-01'},
-  ],
-
-  // ---- Gift cards ----
-  giftCards: [
-    {id:'GC001', code:'CHAMPS-4F2A', amount:100000, classes:null, recipient:'Vicente Andrade', buyer:'Familia Andrade (regalo cumpleaños)', issueDate:'2026-07-15', expiryDate:'2027-01-15', status:'Disponible'},
-    {id:'GC002', code:'CHAMPS-9X7B', amount:null, classes:2, recipient:'Familia Rojas', buyer:'Camila Rojas', issueDate:'2026-06-01', expiryDate:'2026-09-01', status:'Parcialmente utilizada'},
-  ],
-
-  // ---- Historial de cambios de grupo (para trazabilidad) ----
-  groupChangeLog: [
-    {id:'GC-L1', studentId:'A007', fromGroupId:'G001', toGroupId:'G003', date:'2026-06-10', reason:'Ascenso de nivel — evaluación de Nico'},
-  ],
-
-  // ---- Créditos de recuperación ----
-  // Se generan por dos vías: (1) el admin suspende una sesión y la marca recuperable,
-  // (2) el instructor marca a un alumno Ausente al tomar asistencia. El crédito queda
-  // "Pendiente" hasta que se agenda en cualquier sesión futura (grupal o particular),
-  // momento en que pasa a "Agendada", y a "Utilizada" una vez que esa sesión ocurre.
-  recoveries: [
-    {id:'REC001', studentId:'A005', reason:'Suspensión', originSessionId:'S090', date:'2026-08-04', status:'Agendada', assignedSessionId:'S110'},
-  ],
+  instructors: [],
+  locations: [],
+  families: [],
+  groups: [],
+  students: [],
+  sessions: [],
+  bookings: [],
+  attendance: [],
+  observations: [],
+  payments: [],
+  expenses: [],
+  packs: [],
+  giftCards: [],
+  groupChangeLog: [],
+  recoveries: [],
 };
 
 // Helpers de acceso relacional
@@ -902,7 +781,7 @@ async function createRecoveryCredit(studentId, reason, originSessionId){
     if(error){ console.error('Error creando recuperación:', error.message); return; }
     mockData.recoveries.push(mapRecoveryRow(data));
   } else {
-    mockData.recoveries.push({id:'REC'+Math.random().toString(36).slice(2,7), studentId, reason, originSessionId, date:'2026-08-11', status:'Pendiente', assignedSessionId:null});
+    mockData.recoveries.push({id:'REC'+Math.random().toString(36).slice(2,7), studentId, reason, originSessionId, date:todayISO(), status:'Pendiente', assignedSessionId:null});
   }
 }
 
@@ -1668,8 +1547,8 @@ document.getElementById('globalSearch').addEventListener('keydown', (e)=>{
 function computeDashboardMetrics(){
   const activeStudents = mockData.students.filter(s=>s.status==='Activo').length;
   const activeFamilies = mockData.families.length;
-  const todayStr = '2026-08-11';
-  const weekDates = ['2026-08-10','2026-08-11','2026-08-12','2026-08-13','2026-08-14','2026-08-15','2026-08-16'];
+  const todayStr = todayISO();
+  const weekDates = getCurrentWeekDates();
   const classesToday = mockData.sessions.filter(s=>s.date===todayStr && s.status!=='Suspendida').length;
   const classesWeek = mockData.sessions.filter(s=>weekDates.includes(s.date) && s.status!=='Suspendida').length;
   let occupied = 0, capacityTotal = 0;
@@ -1716,12 +1595,12 @@ function renderDashboard(){
   const m = computeDashboardMetrics();
   const alerts = buildDashboardAlerts();
   __alertActions = alerts.map(a=>a.action);
-  const upcoming = mockData.sessions.filter(s=>s.status!=='Suspendida' && s.date>='2026-08-11').sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start)).slice(0,6);
+  const upcoming = mockData.sessions.filter(s=>s.status!=='Suspendida' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start)).slice(0,6);
 
   return `
   <div class="page-head">
     <div><h1>Hola, ${state.userName.split(' ')[0]} <span style="font-weight:400;color:var(--text-2)">— así va MiniChamps hoy</span></h1>
-      <div class="page-sub">${fmtDateLong('2026-08-11')} · <span class="demo-flag">datos ficticios de demostración</span></div>
+      <div class="page-sub">${fmtDateLong(todayISO())}</div>
     </div>
     <button class="btn btn-secondary btn-sm" onclick="navigateTo('reportes')">📈 Ver reportes</button>
   </div>
@@ -1774,8 +1653,32 @@ let __alertActions = [];
 /* ================================================================
    CALENDARIO
    ================================================================ */
-const WEEK_DATES = ['2026-08-10','2026-08-11','2026-08-12','2026-08-13','2026-08-14','2026-08-15','2026-08-16'];
 const WEEK_LABELS = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
+/* Semana real (lunes a domingo) que contiene la fecha de hoy — se recalcula
+   en cada llamada, así el calendario siempre muestra la semana actual en
+   vez de quedar anclado a una semana fija de demostración. */
+function getCurrentWeekDates(){
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  const dow = d.getDay(); // 0=domingo .. 6=sábado
+  const mondayOffset = dow===0 ? -6 : 1-dow;
+  d.setDate(d.getDate()+mondayOffset);
+  const dates = [];
+  for(let i=0;i<7;i++){
+    dates.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`);
+    d.setDate(d.getDate()+1);
+  }
+  return dates;
+}
+function fmtWeekRange(weekDates){
+  const first = new Date(weekDates[0]+'T00:00:00');
+  const last = new Date(weekDates[6]+'T00:00:00');
+  const sameMonth = first.getMonth()===last.getMonth();
+  const monthName = last.toLocaleDateString('es-CL', {month:'long', year:'numeric'});
+  if(sameMonth) return `Semana del ${first.getDate()} al ${last.getDate()} de ${monthName}`;
+  const firstMonthName = first.toLocaleDateString('es-CL', {month:'long'});
+  return `Semana del ${first.getDate()} de ${firstMonthName} al ${last.getDate()} de ${monthName}`;
+}
 
 function getFilteredSessions(){
   const f = state.calendarFilters;
@@ -1830,7 +1733,7 @@ function renderCalendario(){
 
   return `
   <div class="page-head">
-    <div><h1>Calendario</h1><div class="page-sub">Semana del 10 al 16 de agosto, 2026 <span class="demo-flag" style="margin-left:8px;">datos ficticios</span></div></div>
+    <div><h1>Calendario</h1><div class="page-sub">${fmtWeekRange(getCurrentWeekDates())}</div></div>
     <div class="view-switch">
       ${['dia','semana','mes','lista'].map(v=>`<button class="${state.calendarView===v?'active':''}" onclick="state.calendarView='${v}';renderView('calendario')">${v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
     </div>
@@ -1841,11 +1744,13 @@ function renderCalendario(){
 }
 
 function calendarWeekView(sessions){
+  const weekDates = getCurrentWeekDates();
+  const todayStr = todayISO();
   return `<div class="week-grid">
     <div class="week-day-head" style="background:transparent;border-left:none;"></div>
-    ${WEEK_DATES.map((d,i)=>`<div class="week-day-head ${d==='2026-08-11'?'today':''}">${WEEK_LABELS[i]}<div class="d-num">${d.slice(-2)}</div></div>`).join('')}
+    ${weekDates.map((d,i)=>`<div class="week-day-head ${d===todayStr?'today':''}">${WEEK_LABELS[i]}<div class="d-num">${d.slice(-2)}</div></div>`).join('')}
     <div class="week-time-col" style="grid-row:2;"></div>
-    ${WEEK_DATES.map(d=>{
+    ${weekDates.map(d=>{
       const daySessions = sessions.filter(s=>s.date===d).sort((a,b)=>a.start.localeCompare(b.start));
       return `<div class="week-day-col" style="padding:8px 0;min-height:220px;">
         ${daySessions.map(s=>sessionBlockHtml(s)).join('') || `<div style="padding:16px 8px;color:var(--text-3);font-size:11px;text-align:center;">Sin sesiones</div>`}
@@ -1871,23 +1776,28 @@ function calendarListView(sessions){
 }
 
 function calendarDayView(sessions){
-  const daySessions = sessions.filter(s=>s.date==='2026-08-11').sort((a,b)=>a.start.localeCompare(b.start));
+  const todayStr = todayISO();
+  const daySessions = sessions.filter(s=>s.date===todayStr).sort((a,b)=>a.start.localeCompare(b.start));
   return `<div class="table-wrap">${daySessions.map(s=>sessionRowMini(s)).join('') || emptyMini('Sin sesiones hoy para estos filtros')}</div>`;
 }
 
 function calendarMonthView(sessions){
-  // vista mensual simplificada: agrupa por fecha dentro de agosto 2026
+  // vista mensual: mes calendario real que contiene la fecha de hoy.
   const byDate = {};
   sessions.forEach(s=>{ (byDate[s.date] = byDate[s.date]||[]).push(s); });
-  const daysInAug = 31;
-  const firstWeekday = 6; // 1 ago 2026 = sábado (0=lun)
+  const now = new Date();
+  const year = now.getFullYear(), month = now.getMonth();
+  const todayStr = todayISO();
+  const daysInMonth = new Date(year, month+1, 0).getDate();
+  const firstDow = new Date(year, month, 1).getDay(); // 0=domingo..6=sábado
+  const firstWeekday = firstDow===0 ? 6 : firstDow-1; // reindexado a 0=lunes
   let cells = '';
   for(let i=0;i<firstWeekday;i++) cells += `<div></div>`;
-  for(let d=1; d<=daysInAug; d++){
-    const iso = `2026-08-${String(d).padStart(2,'0')}`;
+  for(let d=1; d<=daysInMonth; d++){
+    const iso = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
     const list = byDate[iso]||[];
     cells += `<div class="card-flat" style="min-height:78px;cursor:${list.length?'pointer':'default'};" ${list.length?`onclick="openDaySessionsModal('${iso}')"`:''}>
-      <div style="font-size:12px;font-weight:700;color:${iso==='2026-08-11'?'var(--orange)':'var(--text-2)'};">${d}</div>
+      <div style="font-size:12px;font-weight:700;color:${iso===todayStr?'var(--orange)':'var(--text-2)'};">${d}</div>
       ${list.slice(0,2).map(s=>`<div style="font-size:10px;margin-top:4px;padding:2px 5px;border-radius:5px;background:var(--grad-brand-soft);color:var(--text-0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${s.start} ${getGroup(s.groupId)?.name || 'Particular'}</div>`).join('')}
       ${list.length>2?`<div style="font-size:10px;color:var(--text-2);margin-top:2px;">+${list.length-2} más</div>`:''}
     </div>`;
@@ -2582,13 +2492,21 @@ function openChangeGroupModal(studentId){
   openModal({title:'Cambiar grupo', sub:s.name, bodyHtml:body, wide:true});
 }
 
-function confirmChangeGroup(studentId, newGroupId){
+async function confirmChangeGroup(studentId, newGroupId){
   const s = getStudent(studentId);
   const oldGroup = getGroup(s.groupId);
   const newGroup = getGroup(newGroupId);
+  const fromGroupId = oldGroup?oldGroup.id:null;
   s.groupId = newGroupId;
   s.level = newGroup.level;
-  mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId: oldGroup?oldGroup.id:null, toGroupId:newGroupId, date:'2026-08-11', reason:'Cambio realizado por administrador desde el prototipo'});
+  if(isRealId(studentId)){
+    const { error: updErr } = await sb.from('students').update({group_id:newGroupId, level:newGroup.level}).eq('id', studentId);
+    if(updErr){ toast('Error al cambiar de grupo: '+updErr.message); return; }
+    const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id: isRealId(fromGroupId)?fromGroupId:null, to_group_id:newGroupId, reason:'Cambio realizado por administrador'}).select().single();
+    if(gcRow) mockData.groupChangeLog.push(mapGroupChangeRow(gcRow));
+  } else {
+    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId, toGroupId:newGroupId, date:todayISO(), reason:'Cambio realizado por administrador'});
+  }
   closeModal();
   toast(`${s.name} fue movido a ${newGroup.name}. Cupos y calendario actualizados.`);
   renderView(state.view);
@@ -2802,17 +2720,24 @@ function toggleAddGroupStudent(btn, groupId){
   if(!btn.classList.contains('selected') && selectedCount>=freeSlots){ toast(`Solo quedan ${freeSlots} cupo(s) disponibles.`); return; }
   btn.classList.toggle('selected');
 }
-function confirmAddStudentsToGroup(groupId){
+async function confirmAddStudentsToGroup(groupId){
   const ids = [...document.querySelectorAll('#ag-students .chip-option.selected')].map(b=>b.dataset.studentId);
   if(!ids.length){ toast('Selecciona al menos un alumno.'); return; }
   const g = getGroup(groupId);
-  ids.forEach(studentId=>{
+  for(const studentId of ids){
     const st = getStudent(studentId);
     const oldGroupId = st.groupId;
     st.groupId = groupId;
     st.level = g.level;
-    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:oldGroupId, toGroupId:groupId, date:'2026-08-11', reason:'Inscripción agregada por administrador desde Grupos'});
-  });
+    if(isRealId(studentId)){
+      const { error: updErr } = await sb.from('students').update({group_id:groupId, level:g.level}).eq('id', studentId);
+      if(updErr){ toast(`Error al agregar a ${st.name}: `+updErr.message); continue; }
+      const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id: isRealId(oldGroupId)?oldGroupId:null, to_group_id:groupId, reason:'Inscripción agregada por administrador desde Grupos'}).select().single();
+      if(gcRow) mockData.groupChangeLog.push(mapGroupChangeRow(gcRow));
+    } else {
+      mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:oldGroupId, toGroupId:groupId, date:todayISO(), reason:'Inscripción agregada por administrador desde Grupos'});
+    }
+  }
   closeModal();
   toast(`${ids.length} alumno(s) agregado(s) a ${g.name}.`);
   renderView(state.view);
@@ -3080,7 +3005,7 @@ function renderInstructores(){
 
 function openInstructorModal(instructorId){
   const i = getInstructor(instructorId);
-  const sessions = mockData.sessions.filter(s=>sessionInstructorEntries(s).some(e=>e.instructorId===instructorId) && s.date>='2026-08-04').sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  const sessions = mockData.sessions.filter(s=>sessionInstructorEntries(s).some(e=>e.instructorId===instructorId) && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
   const totals = instructorTotals(instructorId);
   const rows = instructorPayrollRows(instructorId);
   const body = `
@@ -3568,7 +3493,7 @@ function renderRecuperacionesAdmin(){
 function openScheduleRecoveryModal(recoveryId){
   const r = mockData.recoveries.find(x=>x.id===recoveryId);
   const st = getStudent(r.studentId);
-  const candidates = mockData.sessions.filter(s=>s.status==='Programada' && s.date>='2026-08-11' && s.type==='grupal' && !s.studentIds.includes(r.studentId) && s.studentIds.length < (getGroup(s.groupId)?.capacity||99));
+  const candidates = mockData.sessions.filter(s=>s.status==='Programada' && s.date>=todayISO() && s.type==='grupal' && !s.studentIds.includes(r.studentId) && s.studentIds.length < (getGroup(s.groupId)?.capacity||99));
   const body = `
     <div class="form-hint" style="margin-bottom:14px;">Elige cualquier sesión grupal futura con cupo (no tiene que ser del grupo habitual de ${st.name}), o crea una sesión particular gratuita dedicada a esta recuperación.</div>
     <div class="form-group">
@@ -3708,7 +3633,7 @@ function renderFinanzas(){
 
   return `
   <div class="page-head">
-    <div><h1>Finanzas</h1><div class="page-sub">Ingresos, gastos y resultado del período <span class="demo-flag" style="margin-left:8px;">montos ficticios</span></div></div>
+    <div><h1>Finanzas</h1><div class="page-sub">Ingresos, gastos y resultado del período</div></div>
   </div>
   <div class="tabs">${tabs.map(t=>`<button class="tab-btn ${financeState.tab===t?'active':''}" onclick="financeState.tab='${t}';renderView('finanzas')">${tabLabels[t]}</button>`).join('')}</div>
   ${tabBody}
@@ -3875,7 +3800,7 @@ async function confirmAddExpense(){
    ================================================================ */
 function familyChildren(){ return studentsOfFamily(state.apoderadoFamilyId); }
 function nextSessionForStudent(studentId){
-  return mockData.sessions.filter(s=>s.status==='Programada' && s.date>='2026-08-11' && s.studentIds.includes(studentId))
+  return mockData.sessions.filter(s=>s.status==='Programada' && s.date>=todayISO() && s.studentIds.includes(studentId))
     .sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start))[0] || null;
 }
 function familyOwesMoney(studentId){
@@ -3893,7 +3818,7 @@ function renderInicioApoderado(){
   const fam = getFamily(state.apoderadoFamilyId);
   return `
   <div class="page-head">
-    <div><h1>Hola, ${state.userName.split(' ')[0]}</h1><div class="page-sub">${fmtDateLong('2026-08-11')} · <span class="demo-flag">datos ficticios de demostración</span></div></div>
+    <div><h1>Hola, ${state.userName.split(' ')[0]}</h1><div class="page-sub">${fmtDateLong(todayISO())}</div></div>
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     ${kids.map(k=>{
@@ -4019,16 +3944,30 @@ function openApoderadoGroupSearchModal(childId){
   `;
   openModal({title:'Grupos compatibles', sub:activeChild.name, bodyHtml:body, wide:true});
 }
-function apoderadoReserveGroup(studentId, groupId){
+async function apoderadoReserveGroup(studentId, groupId){
   const st = getStudent(studentId);
   const g = getGroup(groupId);
   const oldGroupId = st.groupId;
+  const period = todayISO().slice(0,7);
   st.groupId = groupId;
   st.level = g.level;
   st.tariff = g.tariff;
   st.tariffNote = 'Tarifa estándar del grupo';
-  mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:oldGroupId, toGroupId:groupId, date:'2026-08-11', reason:'Reserva solicitada por el apoderado desde la app'});
-  mockData.payments.push({id:'P'+Math.floor(100+Math.random()*800), familyId:st.familyId, studentId, concept:`Mensualidad — ${g.name}`, period:'2026-08', amount:g.tariff, date:null, method:null, status:'Pendiente', receipt:null});
+  if(isRealId(studentId)){
+    const { error: updErr } = await sb.from('students').update({group_id:groupId, level:g.level, tariff:g.tariff, tariff_note:'Tarifa estándar del grupo'}).eq('id', studentId);
+    if(updErr){ toast('Error al reservar el cupo: '+updErr.message); return; }
+    // El historial de cambio de grupo es solo informativo para el admin; si RLS
+    // lo bloquea (los apoderados no tienen permiso de insert ahí) no debe frenar
+    // la reserva, que ya quedó guardada arriba.
+    sb.from('group_change_log').insert({student_id:studentId, from_group_id: isRealId(oldGroupId)?oldGroupId:null, to_group_id:groupId, reason:'Reserva solicitada por el apoderado desde la app'}).select().single()
+      .then(({data})=>{ if(data) mockData.groupChangeLog.push(mapGroupChangeRow(data)); })
+      .catch(()=>{});
+    const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id:st.familyId, student_id:studentId, concept:`Mensualidad — ${g.name}`, period, amount:g.tariff, status:'Pendiente'}).select().single();
+    if(!payErr && payRow) mockData.payments.push(mapPaymentRow(payRow));
+  } else {
+    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:oldGroupId, toGroupId:groupId, date:todayISO(), reason:'Reserva solicitada por el apoderado desde la app'});
+    mockData.payments.push({id:'P'+Math.floor(100+Math.random()*800), familyId:st.familyId, studentId, concept:`Mensualidad — ${g.name}`, period, amount:g.tariff, date:null, method:null, status:'Pendiente', receipt:null});
+  }
   closeModal();
   toast(`¡Reserva confirmada! ${st.name} quedó en ${g.name}. Se generó el cobro de la mensualidad.`);
   renderView(state.view);
@@ -4059,7 +3998,7 @@ function openApoderadoParticularModal(){
       <div class="form-hint" id="ap-split-hint" style="display:none;">Al dividir el pago, cada persona nueva debe registrar un teléfono de contacto para generar su cobro individual.</div>
     </div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="ap-date" value="2026-08-17" min="2026-08-12"></div>
+      <div class="form-group"><label class="form-label">Fecha</label><input class="form-input" type="date" id="ap-date" value="${todayISO()}" min="${todayISO()}"></div>
       <div class="form-group"><label class="form-label">Horario</label><select class="form-select" id="ap-time"><option>10:00</option><option>11:00</option><option selected>16:00</option><option>17:00</option><option>18:00</option></select></div>
     </div>
     <div class="form-group"><label class="form-label">Locación preferida</label><select class="form-select" id="ap-location">${locationPool.map(l=>`<option value="${l.id}">${l.name}</option>`).join('') || '<option value="">No hay locaciones disponibles todavía</option>'}</select></div>
@@ -4188,7 +4127,7 @@ async function confirmApoderadoParticular(){
     sessionData = {id, groupId:null, date, start, end:endHour, instructors:[{instructorId:availableInstructor.id, role:'Principal', amount:availableInstructor.ratePerClass, status:'Pendiente', note:'Reserva particular vía app apoderado'}], locationId, status:'Programada', type:'particular', studentIds, participantsCount:count, studentAmount, studentPaymentId:null};
     mockData.sessions.push(sessionData);
     studentIds.forEach(studentId=>{
-      mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo:'particular', status:'Confirmada', createdAt:'2026-08-11'});
+      mockData.bookings.push({id:'B'+Math.floor(100+Math.random()*800), studentId, sessionId:id, tipo:'particular', status:'Confirmada', createdAt:todayISO()});
     });
   }
 
@@ -4309,7 +4248,7 @@ async function confirmClaimAvailableSlots(){
 function renderMisClasesApoderado(){
   const kids = familyChildren();
   const kidIds = kids.map(k=>k.id);
-  const upcoming = mockData.sessions.filter(s=>s.status==='Programada' && s.date>='2026-08-11' && s.studentIds.some(id=>kidIds.includes(id))).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  const upcoming = mockData.sessions.filter(s=>s.status==='Programada' && s.date>=todayISO() && s.studentIds.some(id=>kidIds.includes(id))).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
   return `
   <div class="page-head"><div><h1>Mis clases</h1><div class="page-sub">Próximas sesiones de tus hijos</div></div></div>
   <div class="table-wrap">${upcoming.map(s=>sessionRowMini(s)).join('') || emptyMini('Sin próximas clases agendadas')}</div>
@@ -4331,7 +4270,7 @@ function renderRecuperacionesApoderado(){
 function openApoderadoScheduleRecoveryModal(recoveryId){
   const r = mockData.recoveries.find(x=>x.id===recoveryId);
   const st = getStudent(r.studentId);
-  const candidates = mockData.sessions.filter(s=>s.status==='Programada' && s.date>='2026-08-11' && s.type==='grupal' && !s.studentIds.includes(r.studentId) && s.studentIds.length < (getGroup(s.groupId)?.capacity||99));
+  const candidates = mockData.sessions.filter(s=>s.status==='Programada' && s.date>=todayISO() && s.type==='grupal' && !s.studentIds.includes(r.studentId) && s.studentIds.length < (getGroup(s.groupId)?.capacity||99));
   const body = `
     <div class="form-hint" style="margin-bottom:14px;">Puedes elegir cualquier sesión grupal con cupo disponible, no tiene que ser el grupo habitual de ${st.name}.</div>
     <div class="form-group">
@@ -4376,9 +4315,14 @@ function openMercadoPagoModal(paymentId){
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmMercadoPago('${paymentId}')">Simular pago aprobado</button>`;
   openModal({title:'Mercado Pago', bodyHtml:body, footHtml:foot});
 }
-function confirmMercadoPago(paymentId){
+async function confirmMercadoPago(paymentId){
   const p = mockData.payments.find(x=>x.id===paymentId);
-  p.status='Pagado'; p.date='2026-08-11'; p.method='Mercado Pago';
+  const date = todayISO();
+  p.status='Pagado'; p.date=date; p.method='Mercado Pago';
+  if(isRealId(paymentId)){
+    const { error } = await sb.from('payments').update({status:'Pagado', paid_date:date, method:'Mercado Pago'}).eq('id', paymentId);
+    if(error){ toast('Error al registrar el pago: '+error.message); return; }
+  }
   closeModal();
   toast('Pago aprobado (simulado). ¡Gracias!');
   renderView(state.view);
@@ -4397,11 +4341,16 @@ function openTransferModal(paymentId){
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmTransfer('${paymentId}')">Enviar comprobante</button>`;
   openModal({title:'Pagar por transferencia', bodyHtml:body, footHtml:foot});
 }
-function confirmTransfer(paymentId){
+async function confirmTransfer(paymentId){
   const p = mockData.payments.find(x=>x.id===paymentId);
   const fileInput = document.getElementById('tr-file');
   const fileName = fileInput.files[0] ? fileInput.files[0].name : 'comprobante.jpg';
-  p.status='En revisión'; p.receipt=fileName; p.amount = parseInt(document.getElementById('tr-amount').value)||p.amount;
+  const amount = parseInt(document.getElementById('tr-amount').value)||p.amount;
+  p.status='En revisión'; p.receipt=fileName; p.amount = amount;
+  if(isRealId(paymentId)){
+    const { error } = await sb.from('payments').update({status:'En revisión', receipt:fileName, amount}).eq('id', paymentId);
+    if(error){ toast('Error al enviar el comprobante: '+error.message); return; }
+  }
   closeModal();
   toast('Comprobante enviado. Tu pago queda en revisión.');
   renderView(state.view);
@@ -4490,12 +4439,12 @@ function myStudents(){
 
 function renderInicioInstructor(){
   const ins = getInstructor(state.instructorId);
-  const today = myInstructorSessions().filter(s=>s.date==='2026-08-11' && s.status!=='Suspendida');
-  const next = myInstructorSessions().filter(s=>s.status==='Programada' && s.date>='2026-08-11').sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start))[0];
+  const today = myInstructorSessions().filter(s=>s.date===todayISO() && s.status!=='Suspendida');
+  const next = myInstructorSessions().filter(s=>s.status==='Programada' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start))[0];
   const totals = instructorTotals(state.instructorId);
   return `
   <div class="page-head">
-    <div><h1>Hola, ${ins.name.split(' ')[0]}</h1><div class="page-sub">${fmtDateLong('2026-08-11')} · <span class="demo-flag">datos ficticios de demostración</span></div></div>
+    <div><h1>Hola, ${ins.name.split(' ')[0]}</h1><div class="page-sub">${fmtDateLong(todayISO())}</div></div>
   </div>
   <div class="metrics-grid">
     <div class="metric-card"><div class="metric-label">Clases hoy</div><div class="metric-value">${today.length}</div></div>
@@ -4510,7 +4459,7 @@ function renderInicioInstructor(){
 }
 
 function renderMisClasesInstructor(){
-  const upcoming = myInstructorSessions().filter(s=>s.status==='Programada' && s.date>='2026-08-11').sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  const upcoming = myInstructorSessions().filter(s=>s.status==='Programada' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
   const past = myInstructorSessions().filter(s=>s.status==='Realizada').sort((a,b)=>b.date.localeCompare(a.date));
   return `
   <div class="page-head"><div><h1>Mis clases</h1><div class="page-sub">Sesiones donde participas como instructor</div></div></div>
@@ -4545,7 +4494,7 @@ function renderAlumnosInstructor(){
 }
 
 function renderAsistenciaAdmin(){
-  const pending = mockData.sessions.filter(s=>s.status==='Programada' && s.date>='2026-08-04').sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  const pending = mockData.sessions.filter(s=>s.status==='Programada' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
   const done = mockData.sessions.filter(s=>s.status==='Realizada').sort((a,b)=>b.date.localeCompare(a.date));
   const totalRecords = mockData.attendance.length;
   const ausencias = mockData.attendance.filter(a=>a.status==='Ausente').length;
@@ -4578,7 +4527,7 @@ function renderAsistenciaAdmin(){
 }
 
 function renderAsistenciaInstructor(){
-  const sessions = myInstructorSessions().filter(s=>s.status==='Programada' && s.date>='2026-08-04').sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  const sessions = myInstructorSessions().filter(s=>s.status==='Programada' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
   return `
   <div class="page-head"><div><h1>Asistencia</h1><div class="page-sub">Toma asistencia de tus próximas sesiones</div></div></div>
   ${sessions.map(s=>{
@@ -4623,7 +4572,7 @@ async function confirmAddObservation(){
     if(error){ toast('Error al guardar la observación: '+error.message); return; }
     mockData.observations.push(mapObservationRow(data));
   } else {
-    mockData.observations.push({id:'O'+Math.random().toString(36).slice(2,7), studentId, sessionId:null, instructorId:state.instructorId, date:'2026-08-11', content});
+    mockData.observations.push({id:'O'+Math.random().toString(36).slice(2,7), studentId, sessionId:null, instructorId:state.instructorId, date:todayISO(), content});
   }
   closeModal();
   toast('Observación guardada.');
