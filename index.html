@@ -852,6 +852,7 @@ const NAV_CONFIG = {
       {id:'asistencia-instructor', label:'Asistencia', icon:'✅'},
       {id:'observaciones-instructor', label:'Observaciones', icon:'📝'},
       {id:'mis-pagos-instructor', label:'Mis pagos', icon:'💰'},
+      {id:'perfil-instructor', label:'Perfil', icon:'👤'},
     ]},
   ],
 };
@@ -888,6 +889,7 @@ const VIEW_TITLES = {
   'asistencia-instructor':['Asistencia','Toma de asistencia'],
   'observaciones-instructor':['Observaciones','Observaciones registradas'],
   'mis-pagos-instructor':['Mis pagos','Tus clases realizadas y el estado de tu pago'],
+  'perfil-instructor':['Perfil','Datos de tu cuenta'],
 };
 
 /* ================================================================
@@ -988,7 +990,7 @@ function mapLocationRow(row){
   return { id: row.id, name: row.name, address: row.address || '', maps: row.maps_url || '#', desc: row.description || '', active: !!row.active };
 }
 function mapInstructorRow(row){
-  return { id: row.id, name: row.name, role: row.role || 'Instructor', phone: row.phone || '', color: row.color || '#ff6a00', active: !!row.active, ratePerClass: row.rate_per_class || 0 };
+  return { id: row.id, name: row.name, role: row.role || 'Instructor', phone: row.phone || '', email: row.email || '', color: row.color || '#ff6a00', active: !!row.active, ratePerClass: row.rate_per_class || 0 };
 }
 function hhmm(t){ return t ? String(t).slice(0,5) : ''; }
 function minutesBetween(startHHMM, endHHMM){
@@ -2992,7 +2994,7 @@ function renderInstructores(){
       return `<tr class="clickable" onclick="openInstructorModal('${i.id}')">
         <td><div class="name-cell"><div class="row-avatar" style="border-color:${i.color};color:${i.color};">${initials(i.name)}</div><div class="cell-primary">${i.name}</div></div></td>
         <td class="cell-muted">${i.role}</td>
-        <td class="cell-muted">${i.phone}</td>
+        <td class="cell-muted">${i.phone}${i.email?` · ${i.email}`:''}</td>
         <td>${groups.map(g=>g.name).join(', ')||'—'}</td>
         <td class="cell-muted">${fmtMoney(i.ratePerClass)}</td>
         <td>${totals.pendiente>0 ? `<span style="font-weight:700;color:var(--warning);">${fmtMoney(totals.pendiente)}</span>` : `<span class="cell-muted">${fmtMoney(0)}</span>`}</td>
@@ -3011,6 +3013,7 @@ function openInstructorModal(instructorId){
   const body = `
     <div class="child-info-row" style="border-top:none;"><span>Rol</span><span>${i.role}</span></div>
     <div class="child-info-row"><span>Teléfono</span><span>${i.phone}</span></div>
+    <div class="child-info-row"><span>Email / acceso a la app</span><span>${i.email ? i.email : '<span class="cell-muted">Sin acceso creado todavía</span>'}</span></div>
     <div class="child-info-row"><span>Tarifa base por clase</span><span>${fmtMoney(i.ratePerClass)} <span class="cell-muted">(referencial, el monto real se define por sesión)</span></span></div>
     <div class="child-info-row"><span>Grupos a cargo</span><span>${mockData.groups.filter(g=>(g.instructorIds||[]).includes(i.id)).map(g=>g.name).join(', ')||'—'}</span></div>
     <div style="margin-top:16px;">
@@ -3029,8 +3032,76 @@ function openInstructorModal(instructorId){
       <div class="table-wrap">${sessions.map(s=>sessionRowMini(s)).join('') || '<div class="cell-muted" style="padding:14px;">Sin sesiones registradas.</div>'}</div>
     </div>
   `;
-  const foot = isRealId(i.id) ? `<button class="btn btn-primary" onclick="openEditInstructorModal('${i.id}')">✏️ Editar instructor</button>` : '';
+  const foot = isRealId(i.id) ? `
+    <button class="btn btn-secondary" onclick="openCreateInstructorAccessModal('${i.id}')">🔑 ${i.email ? 'Restablecer acceso' : 'Crear acceso a la app'}</button>
+    <button class="btn btn-primary" onclick="openEditInstructorModal('${i.id}')">✏️ Editar instructor</button>
+  ` : '';
   openModal({title:i.name, sub:i.role, bodyHtml:body, footHtml:foot, wide:true});
+}
+
+/* ---- Acceso a la app: el admin crea (o restablece) la cuenta de login del
+   instructor directamente desde aquí. Esto llama a una Edge Function
+   (create-instructor-user) que corre en el servidor con la llave de
+   servicio de Supabase — necesaria para crear usuarios de Auth, algo que
+   nunca se puede hacer de forma segura desde el navegador. La función
+   además vincula automáticamente la cuenta nueva a esta ficha de
+   instructor (profiles.instructor_id), así que al iniciar sesión el
+   instructor entra directo a su panel. ---- */
+function generateTempPassword(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let out = '';
+  for(let i=0;i<10;i++) out += chars[Math.floor(Math.random()*chars.length)];
+  return out;
+}
+function openCreateInstructorAccessModal(instructorId){
+  closeModal();
+  const i = getInstructor(instructorId);
+  const body = `
+    <div class="form-hint" style="margin-bottom:12px;">${i.email ? `Esto crea una cuenta nueva para <strong>${i.email}</strong> con la contraseña que definas aquí (o restablece la contraseña si la cuenta ya existe).` : `Esto le da a ${i.name} acceso propio a la app: entra con su email y esta contraseña, y llega directo a su panel de instructor.`}</div>
+    <div class="form-group"><label class="form-label">Email del instructor</label><input class="form-input" id="cia-email" type="email" value="${i.email||''}" placeholder="correo@ejemplo.com"></div>
+    <div class="form-group"><label class="form-label">Contraseña temporal</label>
+      <div style="display:flex;gap:8px;">
+        <input class="form-input" id="cia-password" value="${generateTempPassword()}">
+        <button class="btn btn-secondary" type="button" onclick="document.getElementById('cia-password').value = generateTempPassword();">🎲 Generar</button>
+      </div>
+      <div class="form-hint">Compártesela al instructor; luego la puede cambiar desde su propio Perfil.</div>
+    </div>
+    <div class="form-hint" id="cia-msg" style="display:none;color:#ff6a6a;"></div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="openInstructorModal('${instructorId}')">Cancelar</button><button class="btn btn-primary" id="cia-submit" onclick="confirmCreateInstructorAccess('${instructorId}')">Crear acceso</button>`;
+  openModal({title:'Acceso a la app', sub:i.name, bodyHtml:body, footHtml:foot});
+}
+async function confirmCreateInstructorAccess(instructorId){
+  const email = document.getElementById('cia-email').value.trim();
+  const password = document.getElementById('cia-password').value;
+  const msgEl = document.getElementById('cia-msg');
+  const hideMsg = ()=>{ if(msgEl){ msgEl.style.display='none'; } };
+  const showMsg = (m)=>{ if(msgEl){ msgEl.textContent=m; msgEl.style.display='block'; } };
+  hideMsg();
+  if(!email){ showMsg('Ingresa el email del instructor.'); return; }
+  if(!password || password.length<6){ showMsg('La contraseña debe tener al menos 6 caracteres.'); return; }
+  const submitBtn = document.getElementById('cia-submit');
+  if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Creando...'; }
+  try{
+    const { data: { session } } = await sb.auth.getSession();
+    if(!session){ showMsg('Tu sesión expiró, vuelve a iniciar sesión.'); return; }
+    const i = getInstructor(instructorId);
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/create-instructor-user`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${session.access_token}` },
+      body: JSON.stringify({ email, password, instructorId, fullName: i.name }),
+    });
+    const result = await res.json().catch(()=>({}));
+    if(!res.ok || result.error){ showMsg(result.error || 'No se pudo crear el acceso.'); return; }
+    i.email = email;
+    toast(`Acceso creado para ${i.name}. Compártele el email y la contraseña.`);
+    closeModal();
+    renderView(state.view);
+  }catch(e){
+    showMsg('Error de conexión: ' + e.message);
+  }finally{
+    if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Crear acceso'; }
+  }
 }
 
 function openNewInstructorModal(){
@@ -3038,8 +3109,9 @@ function openNewInstructorModal(){
     <div class="form-group"><label class="form-label">Nombre completo</label><input class="form-input" id="ni-name" placeholder="Ej: Carolina Arrau"></div>
     <div class="form-group"><label class="form-label">Rol</label><input class="form-input" id="ni-role" placeholder="Ej: Instructora" value="Instructor"></div>
     <div class="form-group"><label class="form-label">Teléfono</label><input class="form-input" id="ni-phone" placeholder="+56 9 ..."></div>
+    <div class="form-group"><label class="form-label">Email (opcional)</label><input class="form-input" type="email" id="ni-email" placeholder="correo@ejemplo.com"></div>
     <div class="form-group"><label class="form-label">Tarifa base por clase</label><input class="form-input" type="number" step="1000" id="ni-rate" value="20000"></div>
-    <div class="form-hint">Esto crea la ficha del instructor. Para darle acceso a la app con su propia cuenta, sigue el Paso 5 de la guía de Supabase (crear su usuario y vincular este instructor_id).</div>
+    <div class="form-hint">Esto crea la ficha del instructor. Para darle acceso a la app con su propia cuenta y contraseña, guarda primero y luego usa el botón "🔑 Crear acceso a la app" en su ficha.</div>
   `;
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmNewInstructor()">Crear instructor</button>`;
   openModal({title:'Nuevo instructor', bodyHtml:body, footHtml:foot});
@@ -3051,6 +3123,7 @@ async function confirmNewInstructor(){
     name,
     role: document.getElementById('ni-role').value.trim() || 'Instructor',
     phone: document.getElementById('ni-phone').value.trim() || null,
+    email: document.getElementById('ni-email').value.trim() || null,
     rate_per_class: parseInt(document.getElementById('ni-rate').value) || 0,
     color: '#ff6a00', active: true,
   };
@@ -3068,8 +3141,10 @@ function openEditInstructorModal(instructorId){
     <div class="form-group"><label class="form-label">Nombre completo</label><input class="form-input" id="ei-name" value="${i.name}"></div>
     <div class="form-group"><label class="form-label">Rol</label><input class="form-input" id="ei-role" value="${i.role}"></div>
     <div class="form-group"><label class="form-label">Teléfono</label><input class="form-input" id="ei-phone" value="${i.phone}"></div>
+    <div class="form-group"><label class="form-label">Email</label><input class="form-input" type="email" id="ei-email" value="${i.email||''}"></div>
     <div class="form-group"><label class="form-label">Tarifa base por clase</label><input class="form-input" type="number" step="1000" id="ei-rate" value="${i.ratePerClass}"></div>
     <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;margin-top:4px;"><input type="checkbox" id="ei-active" ${i.active?'checked':''}> Instructor activo</label>
+    <div class="form-hint">Cambiar el email aquí solo actualiza el dato de contacto — no cambia el email de inicio de sesión de la cuenta ya creada. Para eso, usa "🔑 Restablecer acceso" en su ficha.</div>
   `;
   const foot = `<button class="btn btn-danger" onclick="openDeleteInstructorModal('${instructorId}')">🗑️ Eliminar</button><button class="btn btn-secondary" onclick="openInstructorModal('${instructorId}')">Cancelar</button><button class="btn btn-primary" onclick="confirmEditInstructor('${instructorId}')">Guardar cambios</button>`;
   openModal({title:'Editar instructor', sub:i.name, bodyHtml:body, footHtml:foot});
@@ -3082,12 +3157,13 @@ async function confirmEditInstructor(instructorId){
     name,
     role: document.getElementById('ei-role').value.trim() || i.role,
     phone: document.getElementById('ei-phone').value.trim() || null,
+    email: document.getElementById('ei-email').value.trim() || null,
     rate_per_class: parseInt(document.getElementById('ei-rate').value) || 0,
     active: document.getElementById('ei-active').checked,
   };
   const { error } = await sb.from('instructors').update(payload).eq('id', instructorId);
   if(error){ toast('No se pudo guardar: ' + error.message); return; }
-  i.name = payload.name; i.role = payload.role; i.phone = payload.phone || ''; i.ratePerClass = payload.rate_per_class; i.active = payload.active;
+  i.name = payload.name; i.role = payload.role; i.phone = payload.phone || ''; i.email = payload.email || ''; i.ratePerClass = payload.rate_per_class; i.active = payload.active;
   toast('Instructor actualizado.');
   openInstructorModal(instructorId);
   renderView(state.view);
@@ -4611,6 +4687,47 @@ function renderMisPagosInstructor(){
   `;
 }
 
+function renderPerfilInstructor(){
+  const i = getInstructor(state.instructorId);
+  return `
+  <div class="page-head"><div><h1>Perfil</h1><div class="page-sub">Datos de tu cuenta</div></div></div>
+  <div class="card" style="max-width:480px;margin-bottom:18px;">
+    <div class="child-info-row" style="border-top:none;"><span>Nombre</span><span>${i.name}</span></div>
+    <div class="child-info-row"><span>Rol</span><span>${i.role}</span></div>
+    <div class="child-info-row"><span>Teléfono</span><span>${i.phone||'—'}</span></div>
+    <div class="child-info-row"><span>Email</span><span>${i.email||'—'}</span></div>
+    <div class="form-hint" style="margin-top:10px;">Tu nombre, teléfono y email los administra Nico. Si necesitas cambiarlos, escríbele.</div>
+  </div>
+  <div class="card" style="max-width:480px;">
+    <div class="card-title" style="margin-bottom:12px;">Cambiar contraseña</div>
+    <div class="form-group"><label class="form-label">Contraseña nueva</label><input class="form-input" type="password" id="pfi-password1" placeholder="Mínimo 6 caracteres"></div>
+    <div class="form-group"><label class="form-label">Repetir contraseña nueva</label><input class="form-input" type="password" id="pfi-password2" placeholder="Repite la contraseña"></div>
+    <div class="form-hint" id="pfi-msg" style="display:none;color:#ff6a6a;"></div>
+    <button class="btn btn-primary btn-block" id="pfi-submit" onclick="confirmChangeInstructorPassword()">Guardar contraseña</button>
+  </div>`;
+}
+async function confirmChangeInstructorPassword(){
+  const p1 = document.getElementById('pfi-password1').value;
+  const p2 = document.getElementById('pfi-password2').value;
+  const msgEl = document.getElementById('pfi-msg');
+  const showMsg = (m)=>{ if(msgEl){ msgEl.textContent=m; msgEl.style.display='block'; } };
+  const hideMsg = ()=>{ if(msgEl){ msgEl.style.display='none'; } };
+  hideMsg();
+  if(!p1 || p1.length<6){ showMsg('La contraseña debe tener al menos 6 caracteres.'); return; }
+  if(p1!==p2){ showMsg('Las contraseñas no coinciden.'); return; }
+  const submitBtn = document.getElementById('pfi-submit');
+  if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = 'Guardando...'; }
+  // sb.auth.updateUser() solo puede cambiar la contraseña de la sesión
+  // actualmente autenticada — es seguro llamarlo directo desde el navegador
+  // (a diferencia de crear una cuenta nueva para otra persona).
+  const { error } = await sb.auth.updateUser({ password: p1 });
+  if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = 'Guardar contraseña'; }
+  if(error){ showMsg('No se pudo actualizar: ' + error.message); return; }
+  document.getElementById('pfi-password1').value = '';
+  document.getElementById('pfi-password2').value = '';
+  toast('Contraseña actualizada.');
+}
+
 
 
 /* ================================================================
@@ -5127,6 +5244,7 @@ const VIEW_RENDERERS = {
   'asistencia-instructor': renderAsistenciaInstructor,
   'observaciones-instructor': renderObservacionesInstructor,
   'mis-pagos-instructor': renderMisPagosInstructor,
+  'perfil-instructor': renderPerfilInstructor,
   comunicacion: renderComunicacion,
   reportes: renderReportes,
   configuracion: renderConfiguracion,
