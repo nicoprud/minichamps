@@ -722,7 +722,8 @@ function studentsOfFamily(familyId){ return mockData.students.filter(s=>s.family
    (el primero de la lista) para las pantallas que todavía muestran un solo
    grupo; el detalle completo siempre se obtiene con groupsOfStudent(). ---- */
 function groupsOfStudent(studentId){
-  return mockData.studentGroups.filter(sg=>sg.studentId===studentId).map(sg=>getGroup(sg.groupId)).filter(Boolean);
+  const groups = mockData.studentGroups.filter(sg=>sg.studentId===studentId).map(sg=>getGroup(sg.groupId)).filter(Boolean);
+  return sortGroupsByDay(groups);
 }
 function studentsOfGroup(groupId){
   const ids = new Set(mockData.studentGroups.filter(sg=>sg.groupId===groupId).map(sg=>sg.studentId));
@@ -752,6 +753,7 @@ async function addStudentToGroupWrite(studentId, groupId){
   }
   mockData.studentGroups.push({studentId, groupId});
   await syncStudentPrimaryGroup(studentId);
+  await backfillStudentIntoUpcomingGroupSessions(studentId, groupId);
 }
 async function removeStudentFromGroupWrite(studentId, groupId){
   if(isRealId(studentId) && isRealId(groupId)){
@@ -760,6 +762,44 @@ async function removeStudentFromGroupWrite(studentId, groupId){
   }
   mockData.studentGroups = mockData.studentGroups.filter(sg=>!(sg.studentId===studentId && sg.groupId===groupId));
   await syncStudentPrimaryGroup(studentId);
+  await removeStudentFromUpcomingGroupSessions(studentId, groupId);
+}
+/* ---- Cuando un alumno entra o sale de un grupo, las sesiones YA generadas
+   para ese grupo (vía "Generar sesiones") no se actualizan solas — quedaron
+   con la lista de alumnos tal como estaba al momento de generarlas. Esto
+   corrige eso: suma o saca al alumno de cada sesión Programada futura de
+   ese grupo, para que aparezca correctamente en "Mis clases"/"Historial"
+   apenas se inscribe (o deje de aparecer si se cambia de grupo). ---- */
+async function backfillStudentIntoUpcomingGroupSessions(studentId, groupId){
+  const upcoming = mockData.sessions.filter(s=>s.groupId===groupId && s.status==='Programada' && s.date>=todayISO() && !s.studentIds.includes(studentId));
+  for(const s of upcoming){
+    if(isRealId(s.id) && isRealId(studentId)){
+      const { error } = await sb.from('session_students').insert({session_id:s.id, student_id:studentId});
+      if(error){ console.error('No se pudo sumar a una sesión ya generada:', error.message); continue; }
+    }
+    s.studentIds.push(studentId);
+  }
+}
+async function removeStudentFromUpcomingGroupSessions(studentId, groupId){
+  const upcoming = mockData.sessions.filter(s=>s.groupId===groupId && s.status==='Programada' && s.date>=todayISO() && s.studentIds.includes(studentId));
+  for(const s of upcoming){
+    if(isRealId(s.id) && isRealId(studentId)){
+      const { error } = await sb.from('session_students').delete().eq('session_id', s.id).eq('student_id', studentId);
+      if(error){ console.error('No se pudo quitar de una sesión ya generada:', error.message); continue; }
+    }
+    s.studentIds = s.studentIds.filter(id=>id!==studentId);
+  }
+}
+/* ---- Orden de días de la semana, para que los grupos siempre se listen
+   Lunes -> Domingo en vez de en el orden en que fueron creados. ---- */
+const DAY_ORDER = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
+function sortGroupsByDay(groups){
+  return [...groups].sort((a,b)=>{
+    const ai = DAY_ORDER.indexOf(a.day), bi = DAY_ORDER.indexOf(b.day);
+    const aOrder = ai===-1 ? 999 : ai, bOrder = bi===-1 ? 999 : bi;
+    if(aOrder!==bOrder) return aOrder-bOrder;
+    return (a.time||'').localeCompare(b.time||'');
+  });
 }
 async function replaceStudentGroupsWrite(studentId, groupIds){
   const current = groupsOfStudent(studentId).map(g=>g.id);
@@ -1796,7 +1836,7 @@ function calendarFiltersBar(){
     </select>
     <select class="filter-select" onchange="state.calendarFilters.group=this.value;renderView('calendario')">
       ${opt('todos','Todos los grupos',f.group)}
-      ${mockData.groups.map(g=>opt(g.id,g.name,f.group)).join('')}
+      ${sortGroupsByDay(mockData.groups).map(g=>opt(g.id,g.name,f.group)).join('')}
     </select>
     <select class="filter-select" onchange="state.calendarFilters.type=this.value;renderView('calendario')">
       ${opt('todos','Grupal y particular',f.type)}
@@ -2296,7 +2336,7 @@ function renderAlumnos(){
     </select>
     <select class="filter-select" onchange="state.studentFilters.group=this.value;renderView('alumnos')">
       ${opt('todos','Todos los grupos',f.group)}
-      ${mockData.groups.map(g=>opt(g.id,g.name,f.group)).join('')}
+      ${sortGroupsByDay(mockData.groups).map(g=>opt(g.id,g.name,f.group)).join('')}
     </select>
     <select class="filter-select" onchange="state.studentFilters.status=this.value;renderView('alumnos')">
       ${opt('todos','Todos los estados',f.status)}
@@ -2602,7 +2642,7 @@ function openChangeGroupModal(studentId){
   const currentGroups = groupsOfStudent(studentId);
   const currentIds = currentGroups.map(g=>g.id);
   const age = calcAge(s.birth);
-  const compatible = mockData.groups.filter(g=>g.active && !currentIds.includes(g.id));
+  const compatible = sortGroupsByDay(mockData.groups.filter(g=>g.active && !currentIds.includes(g.id)));
   const body = `
     <div class="form-hint" style="margin-bottom:14px;">Grupo(s) actual(es): <strong>${currentGroups.length ? currentGroups.map(g=>g.name+' · '+g.day+' '+g.time).join(' · ') : 'Sin grupo'}</strong></div>
     ${compatible.map(g=>{
@@ -2827,7 +2867,7 @@ function renderGrupos(){
     <button class="btn btn-primary" onclick="openCreateGroupModal()">+ Nuevo grupo</button>
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;">
-    ${mockData.groups.map(g=>groupCardHtml(g)).join('')}
+    ${sortGroupsByDay(mockData.groups).map(g=>groupCardHtml(g)).join('')}
   </div>`;
 }
 
@@ -3145,7 +3185,7 @@ function renderInstructores(){
   <div class="table-wrap">
     <table><thead><tr><th>Instructor</th><th>Rol</th><th>Teléfono</th><th>Grupos a cargo</th><th>Tarifa/clase</th><th>Por pagar (mes)</th><th>Estado</th></tr></thead><tbody>
     ${mockData.instructors.map(i=>{
-      const groups = mockData.groups.filter(g=>(g.instructorIds||[]).includes(i.id));
+      const groups = sortGroupsByDay(mockData.groups.filter(g=>(g.instructorIds||[]).includes(i.id)));
       const totals = instructorTotals(i.id);
       return `<tr class="clickable" onclick="openInstructorModal('${i.id}')">
         <td><div class="name-cell"><div class="row-avatar" style="border-color:${i.color};color:${i.color};">${initials(i.name)}</div><div class="cell-primary">${i.name}</div></div></td>
@@ -3171,7 +3211,7 @@ function openInstructorModal(instructorId){
     <div class="child-info-row"><span>Teléfono</span><span>${i.phone}</span></div>
     <div class="child-info-row"><span>Email / acceso a la app</span><span>${i.email ? i.email : '<span class="cell-muted">Sin acceso creado todavía</span>'}</span></div>
     <div class="child-info-row"><span>Tarifa base por clase</span><span>${fmtMoney(i.ratePerClass)} <span class="cell-muted">(referencial, el monto real se define por sesión)</span></span></div>
-    <div class="child-info-row"><span>Grupos a cargo</span><span>${mockData.groups.filter(g=>(g.instructorIds||[]).includes(i.id)).map(g=>g.name).join(', ')||'—'}</span></div>
+    <div class="child-info-row"><span>Grupos a cargo</span><span>${sortGroupsByDay(mockData.groups.filter(g=>(g.instructorIds||[]).includes(i.id))).map(g=>g.name).join(', ')||'—'}</span></div>
     <div style="margin-top:16px;">
       <div class="form-label">Pago por clases realizadas (agosto 2026)</div>
       <div style="display:flex;gap:10px;margin-bottom:10px;">
@@ -4211,7 +4251,7 @@ function goToApoderadoGroupPicker(studentId){
 function openApoderadoGroupPickerModal(studentId, frequency, transferTier){
   const st = getStudent(studentId);
   const age = calcAge(st.birth);
-  const compatible = mockData.groups.filter(g=>g.active);
+  const compatible = sortGroupsByDay(mockData.groups.filter(g=>g.active));
   const price = planPriceFor(frequency, transferTier);
   const body = `
     <div class="form-hint" style="margin-bottom:12px;">Plan: <strong>${frequency}x por semana · ${transferTier}</strong> — ${fmtMoney(price)}/mes. Selecciona exactamente ${frequency} grupo(s) que le acomoden a ${st.name}.</div>
@@ -4481,7 +4521,7 @@ async function confirmApoderadoParticular(){
 function renderClasesDisponiblesApoderado(){
   const kids = familyChildren();
   const available = mockData.sessions.filter(s=>s.type==='particular' && s.status==='Disponible' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
-  const groupsWithSpace = mockData.groups.filter(g=>g.active && studentsOfGroup(g.id).length < g.capacity);
+  const groupsWithSpace = sortGroupsByDay(mockData.groups.filter(g=>g.active && studentsOfGroup(g.id).length < g.capacity));
   return `
   <div class="page-head"><div><h1>Clases disponibles</h1><div class="page-sub">Grupos con cupo y horarios particulares publicados por Nico</div></div></div>
 
@@ -5002,7 +5042,7 @@ function renderComunicacion(){
     targetPicker = `<select class="form-select" onchange="commState.targetId=this.value;renderView('comunicacion')">${mockData.students.map(s=>`<option value="${s.id}" ${commState.targetId===s.id?'selected':''}>${s.name}</option>`).join('')}</select>`;
   } else if(commState.tipo==='grupo'){
     if(!commState.targetId) commState.targetId = mockData.groups[0].id;
-    targetPicker = `<select class="form-select" onchange="commState.targetId=this.value;renderView('comunicacion')">${mockData.groups.map(g=>`<option value="${g.id}" ${commState.targetId===g.id?'selected':''}>${g.name}</option>`).join('')}</select>`;
+    targetPicker = `<select class="form-select" onchange="commState.targetId=this.value;renderView('comunicacion')">${sortGroupsByDay(mockData.groups).map(g=>`<option value="${g.id}" ${commState.targetId===g.id?'selected':''}>${g.name}</option>`).join('')}</select>`;
   } else if(commState.tipo==='sesion'){
     const sessions = mockData.sessions.filter(s=>s.status!=='Suspendida').sort((a,b)=>b.date.localeCompare(a.date));
     if(!commState.targetId) commState.targetId = sessions[0]?.id;
@@ -5101,7 +5141,7 @@ const REPORTS = [
   {id:'familias', label:'Familias', desc:'Apoderados con datos de contacto.', fn:()=>exportCSV('familias.csv', ['ID','Apoderado','RUT','Email','WhatsApp','Dirección','N° hijos'],
     mockData.families.map(f=>[f.id,f.apoderado,f.rut,f.email,f.whatsapp,f.address,studentsOfFamily(f.id).length]))},
   {id:'grupos', label:'Grupos', desc:'Grupos con cupo, instructor y tarifa.', fn:()=>exportCSV('grupos.csv', ['ID','Nombre','Nivel','Día','Hora','Instructores','Cupo','Ocupación','Tarifa'],
-    mockData.groups.map(g=>[g.id,g.name,g.level,g.day,g.time,groupInstructorNames(g),g.capacity,studentsOfGroup(g.id).length,g.tariff]))},
+    sortGroupsByDay(mockData.groups).map(g=>[g.id,g.name,g.level,g.day,g.time,groupInstructorNames(g),g.capacity,studentsOfGroup(g.id).length,g.tariff]))},
   {id:'reservas', label:'Reservas', desc:'Reservas grupales, particulares y recuperaciones.', fn:()=>exportCSV('reservas.csv', ['Tipo','Alumno','Detalle','Fecha','Estado'],
     buildReservasRows().map(r=>[r.tipo,r.alumno,r.detalle,r.fecha,r.estado]))},
   {id:'asistencia', label:'Asistencia', desc:'Registros de asistencia por sesión.', fn:()=>exportCSV('asistencia.csv', ['Fecha','Alumno','Estado','Observación'],
