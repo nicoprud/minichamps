@@ -572,12 +572,15 @@ tbody tr.clickable:hover{background:var(--bg-3);}
       <div class="form-group">
         <label class="form-label">Tipo de cuenta</label>
         <div style="display:flex;flex-direction:column;gap:6px;">
-          <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;"><input type="radio" name="su-account-type" value="apoderado" checked> Apoderado — administro a mis hijos</label>
-          <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;"><input type="radio" name="su-account-type" value="rider"> Rider — reservo y pago para mí mismo</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;"><input type="radio" name="su-account-type" value="apoderado" checked onchange="syncSignupWaiverVisibility()"> Apoderado — administro a mis hijos</label>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13.5px;cursor:pointer;"><input type="radio" name="su-account-type" value="rider" onchange="syncSignupWaiverVisibility()"> Rider — reservo y pago para mí mismo</label>
         </div>
       </div>
       <div class="form-group"><label class="form-label">Email</label><input class="form-input" type="email" id="su-email" autocomplete="username"></div>
       <div class="form-group"><label class="form-label">Contraseña</label><input class="form-input" type="password" id="su-password" autocomplete="new-password"></div>
+      <div class="form-group" id="su-waiver-wrap" style="display:none;">
+        <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;"><input type="checkbox" id="su-waiver" style="margin-top:3px;"> Entiendo los riesgos que involucra y libero a Champs y sus instructores de toda responsabilidad.</label>
+      </div>
       <button class="btn btn-primary btn-block" id="signupBtn">Crear cuenta</button>
       <div class="login-note" style="margin-top:16px;">¿Ya tienes cuenta? <a href="#" id="showLoginLink" style="color:var(--orange);">Inicia sesión</a>.</div>
     </div>
@@ -702,6 +705,7 @@ const mockData = {
   giftCards: [],
   groupChangeLog: [],
   recoveries: [],
+  studentGroups: [],
 };
 
 // Helpers de acceso relacional
@@ -712,8 +716,73 @@ function getInstructor(id){ return mockData.instructors.find(i=>i.id===id); }
 function getLocation(id){ return mockData.locations.find(l=>l.id===id); }
 function getSession(id){ return mockData.sessions.find(s=>s.id===id); }
 function studentsOfFamily(familyId){ return mockData.students.filter(s=>s.familyId===familyId); }
-function studentsOfGroup(groupId){ return mockData.students.filter(s=>s.groupId===groupId && s.status!=='Inactivo'); }
+/* ---- Un alumno puede estar inscrito en varios grupos a la vez (plan de 1, 2 o
+   3 veces por semana) — la tabla student_groups guarda esa relación N a N.
+   students.groupId se mantiene solo como "grupo principal" de referencia
+   (el primero de la lista) para las pantallas que todavía muestran un solo
+   grupo; el detalle completo siempre se obtiene con groupsOfStudent(). ---- */
+function groupsOfStudent(studentId){
+  return mockData.studentGroups.filter(sg=>sg.studentId===studentId).map(sg=>getGroup(sg.groupId)).filter(Boolean);
+}
+function studentsOfGroup(groupId){
+  const ids = new Set(mockData.studentGroups.filter(sg=>sg.groupId===groupId).map(sg=>sg.studentId));
+  return mockData.students.filter(s=>ids.has(s.id) && s.status!=='Inactivo');
+}
 function sessionsOfGroup(groupId){ return mockData.sessions.filter(s=>s.groupId===groupId); }
+
+/* ---- Escritura de membresías alumno↔grupo. students.groupId se mantiene
+   sincronizado como el primero de la lista (grupo "principal"), útil para
+   pantallas que aún muestran un solo grupo por simplicidad. ---- */
+async function syncStudentPrimaryGroup(studentId){
+  const st = getStudent(studentId);
+  if(!st) return;
+  const primary = groupsOfStudent(studentId)[0]?.id || null;
+  if(st.groupId === primary) return;
+  st.groupId = primary;
+  if(isRealId(studentId)){
+    const { error } = await sb.from('students').update({group_id:primary}).eq('id', studentId);
+    if(error) console.error('No se pudo sincronizar el grupo principal:', error.message);
+  }
+}
+async function addStudentToGroupWrite(studentId, groupId){
+  if(mockData.studentGroups.some(sg=>sg.studentId===studentId && sg.groupId===groupId)) return;
+  if(isRealId(studentId) && isRealId(groupId)){
+    const { error } = await sb.from('student_groups').insert({student_id:studentId, group_id:groupId});
+    if(error) throw error;
+  }
+  mockData.studentGroups.push({studentId, groupId});
+  await syncStudentPrimaryGroup(studentId);
+}
+async function removeStudentFromGroupWrite(studentId, groupId){
+  if(isRealId(studentId) && isRealId(groupId)){
+    const { error } = await sb.from('student_groups').delete().eq('student_id', studentId).eq('group_id', groupId);
+    if(error) throw error;
+  }
+  mockData.studentGroups = mockData.studentGroups.filter(sg=>!(sg.studentId===studentId && sg.groupId===groupId));
+  await syncStudentPrimaryGroup(studentId);
+}
+async function replaceStudentGroupsWrite(studentId, groupIds){
+  const current = groupsOfStudent(studentId).map(g=>g.id);
+  for(const gid of current){ if(!groupIds.includes(gid)) await removeStudentFromGroupWrite(studentId, gid); }
+  for(const gid of groupIds){ if(!current.includes(gid)) await addStudentToGroupWrite(studentId, gid); }
+}
+async function activateStudentIfProspecto(studentId){
+  const st = getStudent(studentId);
+  if(!st || st.status!=='Prospecto') return;
+  st.status = 'Activo';
+  if(isRealId(studentId)){
+    const { error } = await sb.from('students').update({status:'Activo'}).eq('id', studentId);
+    if(error) console.error('No se pudo activar al alumno:', error.message);
+  }
+}
+function planPriceFor(frequency, transferTier){
+  const table = {
+    1: { 'Sin traslado':100000, 'Semi Traslado':140000, 'Con traslado':160000 },
+    2: { 'Sin traslado':180000, 'Semi Traslado':260000, 'Con traslado':300000 },
+    3: { 'Sin traslado':250000, 'Semi Traslado':380000, 'Con traslado':420000 },
+  };
+  return table[frequency]?.[transferTier] ?? null;
+}
 function paymentsOfFamily(familyId){ return mockData.payments.filter(p=>p.familyId===familyId); }
 function paymentsOfStudent(studentId){ return mockData.payments.filter(p=>p.studentId===studentId); }
 function attendanceOfSession(sessionId){ return mockData.attendance.filter(a=>a.sessionId===sessionId); }
@@ -911,6 +980,11 @@ function toggleSignupForm(show){
   document.getElementById('loginFormWrap').style.display = show ? 'none' : 'block';
   document.getElementById('signupFormWrap').style.display = show ? 'block' : 'none';
   showLoginMsg('');
+  if(show) syncSignupWaiverVisibility();
+}
+function syncSignupWaiverVisibility(){
+  const accountType = document.querySelector('input[name="su-account-type"]:checked').value;
+  document.getElementById('su-waiver-wrap').style.display = accountType==='rider' ? 'block' : 'none';
 }
 
 /* ---- Mapeo Supabase (snake_case, uuid) <-> forma que usa el resto del código
@@ -942,6 +1016,8 @@ function mapStudentRow(row){
     status: row.status,
     tariff: row.tariff,
     tariffNote: row.tariff_note || '',
+    planFrequency: row.plan_frequency || null,
+    planTransfer: row.plan_transfer || null,
     emergency1: row.emergency_contact_1 || '—',
     emergency2: row.emergency_contact_2 || '—',
     clinic: row.clinic || 'No declarada',
@@ -950,6 +1026,7 @@ function mapStudentRow(row){
     photo: row.photo_url || null,
   };
 }
+function mapStudentGroupRow(row){ return { studentId: row.student_id, groupId: row.group_id }; }
 
 /* Suma los datos reales de Supabase a mockData.families / mockData.students
    (RLS filtra automáticamente qué filas le llegan a cada rol: admin ve todo,
@@ -960,16 +1037,20 @@ function mapStudentRow(row){
    referenciando esos IDs de prueba, y reemplazarlos los rompería. Esto se
    limpia cuando terminemos de migrar el resto de los módulos. */
 async function loadRealAlumnosFamilias(){
-  const [{ data: famRows, error: famErr }, { data: stuRows, error: stuErr }] = await Promise.all([
+  const [{ data: famRows, error: famErr }, { data: stuRows, error: stuErr }, { data: sgRows, error: sgErr }] = await Promise.all([
     sb.from('families').select('*'),
     sb.from('students').select('*'),
+    sb.from('student_groups').select('*'),
   ]);
   if(famErr) console.error('Error cargando familias:', famErr.message);
   if(stuErr) console.error('Error cargando alumnos:', stuErr.message);
+  if(sgErr) console.error('Error cargando inscripciones a grupos:', sgErr.message);
   const newFamilies = (famRows||[]).map(mapFamilyRow);
   const newStudents = (stuRows||[]).map(mapStudentRow);
+  const newStudentGroups = (sgRows||[]).map(mapStudentGroupRow);
   mockData.families = [...mockData.families, ...newFamilies];
   mockData.students = [...mockData.students, ...newStudents];
+  mockData.studentGroups = [...mockData.studentGroups, ...newStudentGroups];
 }
 
 /* ---- Identificar registros reales (uuid de Supabase) vs. los de prueba
@@ -1118,7 +1199,12 @@ function openDeleteConfirmModal({title, warning, onConfirmCall}){
 }
 
 function localCascadeAfterGroupDelete(groupId){
-  mockData.students.forEach(s=>{ if(s.groupId===groupId) s.groupId=null; });
+  const affected = mockData.studentGroups.filter(sg=>sg.groupId===groupId).map(sg=>sg.studentId);
+  mockData.studentGroups = mockData.studentGroups.filter(sg=>sg.groupId!==groupId);
+  affected.forEach(studentId=>{
+    const st = getStudent(studentId);
+    if(st) st.groupId = groupsOfStudent(studentId)[0]?.id || null;
+  });
   mockData.sessions.forEach(s=>{ if(s.groupId===groupId) s.groupId=null; });
 }
 function localCascadeAfterStudentDelete(studentId){
@@ -1378,10 +1464,12 @@ async function handleSignupSubmit(){
   const password = document.getElementById('su-password').value;
   if(!name || !email || !password){ showLoginMsg('Completa todos los campos.', true); return; }
   if(password.length < 6){ showLoginMsg('La contraseña debe tener al menos 6 caracteres.', true); return; }
+  const waiver = document.getElementById('su-waiver').checked;
+  if(accountType==='rider' && !waiver){ showLoginMsg('Debes aceptar la liberación de responsabilidad para crear tu cuenta de rider.', true); return; }
   showLoginMsg('Creando cuenta...');
   const { data, error } = await sb.auth.signUp({
     email, password,
-    options: { data: { role: 'apoderado', account_type: accountType, full_name: name } }
+    options: { data: { role: 'apoderado', account_type: accountType, full_name: name, waiver } }
   });
   if(error){ showLoginMsg(error.message, true); return; }
   if(data.session){
@@ -1865,9 +1953,52 @@ function openSessionModal(sessionId){
     ${s.status==='Programada' ? `<button class="btn btn-secondary" onclick="closeModal();openAttendanceModal('${s.id}')">✅ Tomar asistencia</button>` : ''}
     ${canSuspend ? `<button class="btn btn-danger" onclick="closeModal();openSuspendModal('${s.id}')">⛈️ Suspender sesión</button>` : ''}
     ${s.status==='Disponible' && isRealId(s.id) ? `<button class="btn btn-danger" onclick="openDeleteSessionModal('${s.id}')">🗑️ Eliminar horario</button>` : ''}
-  ` : (state.role==='instructor' && s.status==='Programada' ? `<button class="btn btn-secondary" onclick="closeModal();openAttendanceModal('${s.id}')">✅ Tomar asistencia</button>` : '');
+  ` : (state.role==='instructor' && s.status==='Programada' ? `<button class="btn btn-secondary" onclick="closeModal();openAttendanceModal('${s.id}')">✅ Tomar asistencia</button>`
+    : (state.role==='apoderado' && s.type==='particular' && s.status==='Programada' && s.studentIds.some(id=>familyChildren().map(k=>k.id).includes(id)) ? `<button class="btn btn-danger" onclick="closeModal();openCancelParticularModal('${s.id}')">✖️ Cancelar reserva</button>` : ''));
 
   openModal({title: g ? g.name : 'Clase particular', sub:`${fmtDate(s.date)} · ${s.start}–${s.end}`, bodyHtml:body, footHtml:foot});
+}
+
+/* ---- Autocancelación de clase particular por el apoderado: la sesión
+   vuelve a 'Disponible' (libre para que otra familia la tome) y el cobro
+   pendiente asociado se anula automáticamente. Solo se permite hasta 24h
+   antes del horario de la clase; más cerca de la hora, se pide contactar
+   a Nico directamente en vez de cancelar sola/o desde la app. ---- */
+function openCancelParticularModal(sessionId){
+  const s = getSession(sessionId);
+  const hoursUntil = (new Date(s.date+'T'+s.start+':00') - new Date()) / 3600000;
+  const tooLate = hoursUntil < 24;
+  const body = `<div class="alert severity-${tooLate?'high':'mid'}"><div class="alert-ic">${tooLate?'⚠️':'ℹ️'}</div><div class="alert-desc">${tooLate ? 'Esta clase es en menos de 24 horas, así que no se puede cancelar sola/o desde la app. Escríbele directamente a Nico para coordinarlo.' : 'El horario quedará disponible para que otra familia lo tome, y el cobro pendiente asociado se anulará automáticamente.'}</div></div>`;
+  const foot = tooLate ? `<button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>` : `<button class="btn btn-secondary" onclick="closeModal()">Volver</button><button class="btn btn-danger" onclick="confirmCancelParticularSession('${sessionId}')">Sí, cancelar</button>`;
+  openModal({title:'Cancelar clase particular', sub:`${fmtDate(s.date)} · ${s.start}–${s.end}`, bodyHtml:body, footHtml:foot});
+}
+async function confirmCancelParticularSession(sessionId){
+  const s = getSession(sessionId);
+  if(!s || s.status!=='Programada' || s.type!=='particular'){ toast('Esta clase ya no se puede cancelar.'); return; }
+  const paymentId = s.studentPaymentId;
+  if(isRealId(sessionId)){
+    const { error: updErr } = await sb.from('sessions').update({status:'Disponible', participants_count:0, student_amount:null, student_payment_id:null}).eq('id', sessionId).eq('status','Programada');
+    if(updErr){ toast('Error al cancelar: '+updErr.message); return; }
+    await sb.from('session_students').delete().eq('session_id', sessionId);
+    await sb.from('bookings').delete().eq('session_id', sessionId);
+    if(paymentId && isRealId(paymentId)){
+      const pay = mockData.payments.find(p=>p.id===paymentId);
+      if(pay && pay.status==='Pendiente'){
+        const { error: payErr } = await sb.from('payments').update({status:'Anulado'}).eq('id', paymentId);
+        if(!payErr) pay.status = 'Anulado'; else console.error('No se pudo anular el cobro:', payErr.message);
+      }
+    }
+  } else {
+    if(paymentId){
+      const pay = mockData.payments.find(p=>p.id===paymentId);
+      if(pay && pay.status==='Pendiente') pay.status = 'Anulado';
+    }
+  }
+  s.status = 'Disponible'; s.studentIds = []; s.participantsCount = 0; s.studentAmount = null; s.studentPaymentId = null;
+  mockData.bookings = mockData.bookings.filter(b=>b.sessionId!==sessionId);
+  closeModal();
+  toast('Reserva cancelada. El horario quedó disponible nuevamente.');
+  renderView(state.view);
 }
 
 function payrollBadge(status){
@@ -2139,7 +2270,7 @@ function getFilteredStudents(){
   return mockData.students.filter(s=>{
     if(f.q && !(s.name.toLowerCase().includes(f.q) || getFamily(s.familyId).apoderado.toLowerCase().includes(f.q))) return false;
     if(f.level!=='todos' && s.level!==f.level) return false;
-    if(f.group!=='todos' && s.groupId!==f.group) return false;
+    if(f.group!=='todos' && !groupsOfStudent(s.id).some(g=>g.id===f.group)) return false;
     if(f.status!=='todos' && s.status!==f.status) return false;
     return true;
   });
@@ -2177,15 +2308,15 @@ function renderAlumnos(){
       <thead><tr><th>Alumno</th><th>Edad</th><th>Nivel</th><th>Grupo</th><th>Instructor</th><th>Estado</th><th>Pago</th></tr></thead>
       <tbody>
         ${students.map(s=>{
-          const g = getGroup(s.groupId);
+          const sGroups = groupsOfStudent(s.id);
           const pays = paymentsOfStudent(s.id);
           const lastPay = pays[pays.length-1];
           return `<tr class="clickable" onclick="openStudentModal('${s.id}')">
             <td><div class="name-cell"><div class="row-avatar">${avatarInner(s)}</div><div><div class="cell-primary">${s.name}</div><div class="cell-muted">${getFamily(s.familyId).apoderado}</div></div></div></td>
             <td>${calcAge(s.birth)} años</td>
             <td>${s.level}</td>
-            <td>${g ? g.name : '<span class="cell-muted">Sin grupo (particular)</span>'}</td>
-            <td>${g ? groupInstructorNames(g) : '<span class="cell-muted">—</span>'}</td>
+            <td>${sGroups.length ? sGroups.map(g=>g.name).join(', ') : '<span class="cell-muted">Sin grupo (particular)</span>'}</td>
+            <td>${sGroups.length ? sGroups.map(g=>groupInstructorNames(g)).join(', ') : '<span class="cell-muted">—</span>'}</td>
             <td>${statusBadge(s.status)}</td>
             <td>${lastPay ? paymentBadge(lastPay.status) : '<span class="cell-muted">—</span>'}</td>
           </tr>`;
@@ -2208,7 +2339,7 @@ let lastStudentTab = 'info';
 function openStudentModal(studentId, tab){
   const s = getStudent(studentId);
   const fam = getFamily(s.familyId);
-  const g = getGroup(s.groupId);
+  const studentGroups = groupsOfStudent(s.id);
   const siblings = studentsOfFamily(fam.id).filter(x=>x.id!==s.id);
   const activeTab = tab || 'info';
   lastStudentTab = activeTab;
@@ -2222,7 +2353,8 @@ function openStudentModal(studentId, tab){
       <div class="child-info-row" style="border-top:none;"><span>Fecha de nacimiento</span><span>${fmtDate(s.birth)} (${calcAge(s.birth)} años)</span></div>
       <div class="child-info-row"><span>Nivel</span><span>${s.level}</span></div>
       <div class="child-info-row"><span>Experiencia</span><span style="text-align:right;max-width:60%;">${s.experience}</span></div>
-      <div class="child-info-row"><span>Grupo actual</span><span>${g ? g.name+' · '+g.day+' '+g.time : 'Sin grupo (particular)'}</span></div>
+      <div class="child-info-row"><span>Grupo(s) actual(es)</span><span>${studentGroups.length ? studentGroups.map(g=>g.name+' · '+g.day+' '+g.time).join(' · ') : 'Sin grupo (particular)'}</span></div>
+      ${s.planFrequency ? `<div class="child-info-row"><span>Plan</span><span>${s.planFrequency}x por semana · ${s.planTransfer||'Sin traslado'}</span></div>` : ''}
       <div class="child-info-row"><span>Tarifa</span><span>${s.tariff ? fmtMoney(s.tariff)+' / mes' : '—'} <span class="cell-muted">(${s.tariffNote})</span></span></div>
       <div class="child-info-row"><span>Apoderado</span><span>${fam.apoderado} · ${fam.whatsapp}</span></div>
       <div class="child-info-row"><span>Hermanos</span><span>${siblings.length ? siblings.map(x=>x.name).join(', ') : '—'}</span></div>
@@ -2237,10 +2369,9 @@ function openStudentModal(studentId, tab){
   } else if(activeTab==='actividades'){
     const changes = mockData.groupChangeLog.filter(c=>c.studentId===s.id).sort((a,b)=>b.date.localeCompare(a.date));
     const recs = recoveriesOfStudent(s.id);
-    const currentGroup = g;
     tabBody = `
-      <div class="form-label">Grupo actual</div>
-      ${currentGroup ? groupCardHtml(currentGroup) : '<div class="cell-muted" style="margin-bottom:14px;">Sin grupo grupal asignado actualmente.</div>'}
+      <div class="form-label">Grupo(s) actual(es)</div>
+      ${studentGroups.length ? studentGroups.map(g=>groupCardHtml(g)).join('') : '<div class="cell-muted" style="margin-bottom:14px;">Sin grupo grupal asignado actualmente.</div>'}
       <div class="form-label" style="margin-top:18px;">Historial de cambios de grupo</div>
       ${changes.map(c=>`<div class="card-flat" style="margin-bottom:8px;">
         <div style="font-weight:700;font-size:12.5px;">${fmtDate(c.date)}</div>
@@ -2367,8 +2498,8 @@ function openEditStudentAdminModal(studentId){
     </div>
     <div class="form-group"><label class="form-label">Nota de tarifa</label><input class="form-input" id="ea-tariffnote" value="${s.tariffNote||''}"></div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Contacto de emergencia 1</label><input class="form-input" id="ea-em1" value="${s.emergency1==='—'?'':s.emergency1}"></div>
-      <div class="form-group"><label class="form-label">Contacto de emergencia 2</label><input class="form-input" id="ea-em2" value="${s.emergency2==='—'?'':s.emergency2}"></div>
+      <div class="form-group"><label class="form-label">Contacto de emergencia 1</label><input class="form-input" id="ea-em1" placeholder="Ej: María Pérez, +56 9 1234 5678" value="${s.emergency1==='—'?'':s.emergency1}"></div>
+      <div class="form-group"><label class="form-label">Contacto de emergencia 2</label><input class="form-input" id="ea-em2" placeholder="Ej: Juan Pérez, +56 9 8765 4321" value="${s.emergency2==='—'?'':s.emergency2}"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Clínica</label><input class="form-input" id="ea-clinic" value="${s.clinic==='No declarada'?'':s.clinic}"></div>
@@ -2420,8 +2551,8 @@ function openEditOwnProfileModal(studentId){
     </div>
     <div class="form-group"><label class="form-label">Experiencia</label><input class="form-input" id="eo-exp" value="${s.experience}"></div>
     <div class="form-row">
-      <div class="form-group"><label class="form-label">Contacto de emergencia 1</label><input class="form-input" id="eo-em1" value="${s.emergency1}"></div>
-      <div class="form-group"><label class="form-label">Contacto de emergencia 2</label><input class="form-input" id="eo-em2" value="${s.emergency2==='—'?'':s.emergency2}"></div>
+      <div class="form-group"><label class="form-label">Contacto de emergencia 1</label><input class="form-input" id="eo-em1" placeholder="Ej: María Pérez, +56 9 1234 5678" value="${s.emergency1==='—'?'':s.emergency1}"></div>
+      <div class="form-group"><label class="form-label">Contacto de emergencia 2</label><input class="form-input" id="eo-em2" placeholder="Ej: Juan Pérez, +56 9 8765 4321" value="${s.emergency2==='—'?'':s.emergency2}"></div>
     </div>
     <div class="form-row">
       <div class="form-group"><label class="form-label">Clínica / centro de salud</label><input class="form-input" id="eo-clinic" value="${s.clinic==='No declarada'?'':s.clinic}"></div>
@@ -2468,11 +2599,12 @@ function attendanceBadge(status){
 
 function openChangeGroupModal(studentId){
   const s = getStudent(studentId);
-  const currentGroup = getGroup(s.groupId);
+  const currentGroups = groupsOfStudent(studentId);
+  const currentIds = currentGroups.map(g=>g.id);
   const age = calcAge(s.birth);
-  const compatible = mockData.groups.filter(g=>g.active && g.id!==s.groupId);
+  const compatible = mockData.groups.filter(g=>g.active && !currentIds.includes(g.id));
   const body = `
-    <div class="form-hint" style="margin-bottom:14px;">Grupo actual: <strong>${currentGroup ? currentGroup.name+' · '+currentGroup.day+' '+currentGroup.time : 'Sin grupo'}</strong></div>
+    <div class="form-hint" style="margin-bottom:14px;">Grupo(s) actual(es): <strong>${currentGroups.length ? currentGroups.map(g=>g.name+' · '+g.day+' '+g.time).join(' · ') : 'Sin grupo'}</strong></div>
     ${compatible.map(g=>{
       const occ = studentsOfGroup(g.id).length;
       const full = occ >= g.capacity;
@@ -2482,35 +2614,60 @@ function openChangeGroupModal(studentId){
           <div>
             <div style="font-weight:700;font-size:13.5px;">${g.name} ${!ageOk?'<span class=\"badge badge-warning\" style=\"margin-left:6px;\">Edad fuera de rango</span>':''}</div>
             <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name || 'Sin locación'}</div>
-            <div class="cell-muted">Tarifa: ${fmtMoney(g.tariff)}/mes ${currentGroup && currentGroup.tariff!==g.tariff ? `<span style="color:${g.tariff>currentGroup.tariff?'var(--danger)':'var(--success)'}">(actual ${fmtMoney(currentGroup.tariff)})</span>`:''}</div>
           </div>
-          <button class="btn btn-sm ${full?'btn-secondary':'btn-primary'}" ${full?'disabled':''} onclick="confirmChangeGroup('${studentId}','${g.id}')">${full?'Sin cupo':'Mover aquí'}</button>
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+            <button class="btn btn-sm ${full?'btn-secondary':'btn-primary'}" ${full?'disabled':''} onclick="confirmChangeGroup('${studentId}','${g.id}')">${full?'Sin cupo':'Mover aquí'}</button>
+            ${currentGroups.length ? `<button class="btn btn-sm btn-secondary" ${full?'disabled':''} onclick="confirmAddExtraGroup('${studentId}','${g.id}')">+ Sumar sin quitar los demás</button>` : ''}
+          </div>
         </div>
         <div class="capacity-bar"><div class="capacity-bar-fill ${full?'full':''}" style="width:${Math.min(100,occ/g.capacity*100)}%"></div></div>
         <div class="cell-muted" style="margin-top:4px;">${occ}/${g.capacity} cupos ocupados</div>
       </div>`;
     }).join('')}
+    ${currentGroups.length ? `<div class="form-hint">"Mover aquí" reemplaza todos sus grupos actuales por este. "Sumar sin quitar los demás" lo deja en ambos (útil si va 2 o 3 veces por semana).</div>` : ''}
   `;
   openModal({title:'Cambiar grupo', sub:s.name, bodyHtml:body, wide:true});
 }
 
 async function confirmChangeGroup(studentId, newGroupId){
   const s = getStudent(studentId);
-  const oldGroup = getGroup(s.groupId);
+  const oldGroups = groupsOfStudent(studentId);
   const newGroup = getGroup(newGroupId);
-  const fromGroupId = oldGroup?oldGroup.id:null;
-  s.groupId = newGroupId;
   s.level = newGroup.level;
+  try{
+    await replaceStudentGroupsWrite(studentId, [newGroupId]);
+  }catch(e){ toast('Error al cambiar de grupo: '+e.message); return; }
   if(isRealId(studentId)){
-    const { error: updErr } = await sb.from('students').update({group_id:newGroupId, level:newGroup.level}).eq('id', studentId);
-    if(updErr){ toast('Error al cambiar de grupo: '+updErr.message); return; }
-    const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id: isRealId(fromGroupId)?fromGroupId:null, to_group_id:newGroupId, reason:'Cambio realizado por administrador'}).select().single();
-    if(gcRow) mockData.groupChangeLog.push(mapGroupChangeRow(gcRow));
+    const { error: lvlErr } = await sb.from('students').update({level:newGroup.level}).eq('id', studentId);
+    if(lvlErr) console.error('No se pudo actualizar el nivel:', lvlErr.message);
+    for(const og of (oldGroups.length ? oldGroups : [null])){
+      const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id: og && isRealId(og.id) ? og.id : null, to_group_id:newGroupId, reason:'Cambio realizado por administrador'}).select().single();
+      if(gcRow) mockData.groupChangeLog.push(mapGroupChangeRow(gcRow));
+    }
   } else {
-    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId, toGroupId:newGroupId, date:todayISO(), reason:'Cambio realizado por administrador'});
+    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId: oldGroups[0]?.id||null, toGroupId:newGroupId, date:todayISO(), reason:'Cambio realizado por administrador'});
   }
+  await activateStudentIfProspecto(studentId);
   closeModal();
   toast(`${s.name} fue movido a ${newGroup.name}. Cupos y calendario actualizados.`);
+  renderView(state.view);
+}
+
+async function confirmAddExtraGroup(studentId, groupId){
+  const s = getStudent(studentId);
+  const g = getGroup(groupId);
+  try{
+    await addStudentToGroupWrite(studentId, groupId);
+  }catch(e){ toast('Error al sumar el grupo: '+e.message); return; }
+  if(isRealId(studentId) && isRealId(groupId)){
+    const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id:null, to_group_id:groupId, reason:'Grupo adicional agregado por administrador'}).select().single();
+    if(gcRow) mockData.groupChangeLog.push(mapGroupChangeRow(gcRow));
+  } else {
+    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:null, toGroupId:groupId, date:todayISO(), reason:'Grupo adicional agregado por administrador'});
+  }
+  await activateStudentIfProspecto(studentId);
+  closeModal();
+  toast(`${s.name} ahora también está en ${g.name}.`);
   renderView(state.view);
 }
 
@@ -2704,11 +2861,11 @@ function openAddStudentsToGroupModal(groupId){
   const g = getGroup(groupId);
   const occ = studentsOfGroup(groupId).length;
   const freeSlots = g.capacity - occ;
-  const available = mockData.students.filter(st=>st.status!=='Inactivo' && st.groupId!==groupId);
+  const available = mockData.students.filter(st=>st.status!=='Inactivo' && !groupsOfStudent(st.id).some(gr=>gr.id===groupId));
   const body = `
-    <div class="form-hint" style="margin-bottom:12px;">Quedan ${freeSlots} cupo(s) disponibles en ${g.name}. Al agregar un alumno se convierte en su grupo grupal recurrente (se conserva el historial del grupo anterior si tenía uno).</div>
+    <div class="form-hint" style="margin-bottom:12px;">Quedan ${freeSlots} cupo(s) disponibles en ${g.name}. Esto suma este grupo a cada alumno seleccionado, sin quitarle los grupos que ya tenga (útil si va más de una vez por semana).</div>
     <div class="form-radio-group" id="ag-students">
-      ${available.map(st=>`<button type="button" class="chip-option" data-student-id="${st.id}" onclick="toggleAddGroupStudent(this,'${groupId}')">${st.name}${st.groupId?` <span class="cell-muted">(hoy: ${getGroup(st.groupId)?.name})</span>`:''}</button>`).join('') || '<div class="cell-muted">No hay alumnos disponibles para agregar.</div>'}
+      ${available.map(st=>{ const other = groupsOfStudent(st.id); return `<button type="button" class="chip-option" data-student-id="${st.id}" onclick="toggleAddGroupStudent(this,'${groupId}')">${st.name}${other.length?` <span class="cell-muted">(hoy: ${other.map(gr=>gr.name).join(', ')})</span>`:''}</button>`; }).join('') || '<div class="cell-muted">No hay alumnos disponibles para agregar.</div>'}
     </div>
   `;
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmAddStudentsToGroup('${groupId}')">Agregar seleccionados</button>`;
@@ -2728,17 +2885,16 @@ async function confirmAddStudentsToGroup(groupId){
   const g = getGroup(groupId);
   for(const studentId of ids){
     const st = getStudent(studentId);
-    const oldGroupId = st.groupId;
-    st.groupId = groupId;
-    st.level = g.level;
-    if(isRealId(studentId)){
-      const { error: updErr } = await sb.from('students').update({group_id:groupId, level:g.level}).eq('id', studentId);
-      if(updErr){ toast(`Error al agregar a ${st.name}: `+updErr.message); continue; }
-      const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id: isRealId(oldGroupId)?oldGroupId:null, to_group_id:groupId, reason:'Inscripción agregada por administrador desde Grupos'}).select().single();
+    try{
+      await addStudentToGroupWrite(studentId, groupId);
+    }catch(e){ toast(`Error al agregar a ${st.name}: `+e.message); continue; }
+    if(isRealId(studentId) && isRealId(groupId)){
+      const { data: gcRow } = await sb.from('group_change_log').insert({student_id:studentId, from_group_id:null, to_group_id:groupId, reason:'Inscripción agregada por administrador desde Grupos'}).select().single();
       if(gcRow) mockData.groupChangeLog.push(mapGroupChangeRow(gcRow));
     } else {
-      mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:oldGroupId, toGroupId:groupId, date:todayISO(), reason:'Inscripción agregada por administrador desde Grupos'});
+      mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:null, toGroupId:groupId, date:todayISO(), reason:'Inscripción agregada por administrador desde Grupos'});
     }
+    await activateStudentIfProspecto(studentId);
   }
   closeModal();
   toast(`${ids.length} alumno(s) agregado(s) a ${g.name}.`);
@@ -3492,9 +3648,10 @@ async function confirmNewParticular(editSessionId){
    ================================================================ */
 function buildReservasRows(){
   const rows = [];
-  mockData.students.filter(s=>s.groupId).forEach(s=>{
-    const g = getGroup(s.groupId);
-    rows.push({tipo:'Grupal', alumno:s.name, detalle:g.name, fecha:'Recurrente · '+g.day+' '+g.time, estado:'Confirmada'});
+  mockData.students.forEach(s=>{
+    groupsOfStudent(s.id).forEach(g=>{
+      rows.push({tipo:'Grupal', alumno:s.name, detalle:g.name, fecha:'Recurrente · '+g.day+' '+g.time, estado:'Confirmada'});
+    });
   });
   mockData.bookings.forEach(b=>{
     const s = getStudent(b.studentId);
@@ -3899,12 +4056,12 @@ function renderInicioApoderado(){
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     ${kids.map(k=>{
       const next = nextSessionForStudent(k.id);
-      const g = getGroup(k.groupId);
+      const kidGroups = groupsOfStudent(k.id);
       const owes = familyOwesMoney(k.id);
       return `<div class="card">
         <div class="name-cell" style="margin-bottom:12px;">
           <div class="child-avatar">${avatarInner(k)}</div>
-          <div><div style="font-weight:800;font-size:15px;">${k.name}</div><div class="cell-muted">${g ? g.name : 'Sin grupo asignado'}</div></div>
+          <div><div style="font-weight:800;font-size:15px;">${k.name}</div><div class="cell-muted">${kidGroups.length ? kidGroups.map(g=>g.name).join(', ') : 'Sin grupo asignado'}</div></div>
         </div>
         ${next ? `
           <div class="card-flat" style="margin-bottom:10px;">
@@ -3931,15 +4088,17 @@ function renderMisHijos(){
   </div>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;">
     ${kids.map(k=>{
-      const g = getGroup(k.groupId);
+      const kidGroups = groupsOfStudent(k.id);
       return `<div class="child-card">
         <div class="child-card-head">
           <div class="child-avatar">${avatarInner(k)}</div>
           <div><div class="child-name">${k.name}</div><div class="child-meta">${calcAge(k.birth)} años · ${k.level}</div></div>
         </div>
-        <div class="child-info-row"><span>Grupo</span><span>${g ? g.name : 'Sin grupo'}</span></div>
-        <div class="child-info-row"><span>Horario</span><span>${g ? g.day+' '+g.time : '—'}</span></div>
-        <div class="child-info-row"><span>Instructor</span><span>${g ? groupInstructorNames(g) : '—'}</span></div>
+        ${kidGroups.length ? kidGroups.map(g=>`
+        <div class="child-info-row"><span>Grupo</span><span>${g.name}</span></div>
+        <div class="child-info-row"><span>Horario</span><span>${g.day} ${g.time}</span></div>
+        <div class="child-info-row"><span>Instructor</span><span>${groupInstructorNames(g)}</span></div>`).join('') : `
+        <div class="child-info-row"><span>Grupo</span><span>Sin grupo</span></div>`}
         <div class="child-info-row"><span>Estado</span><span>${statusBadge(k.status)}</span></div>
         <button class="btn btn-secondary btn-sm btn-block" onclick="openStudentModal('${k.id}')">Ver detalle</button>
       </div>`;
@@ -3955,7 +4114,13 @@ function openAddChildModal(){
       <div class="form-group"><label class="form-label">Nivel declarado</label><select class="form-select" id="ac-level"><option>Básico</option><option>Intermedio</option><option>Avanzado</option></select></div>
     </div>
     <div class="form-group"><label class="form-label">Experiencia</label><input class="form-input" id="ac-exp" placeholder="Ej: Sin experiencia previa"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Contacto de emergencia 1</label><input class="form-input" id="ac-em1" placeholder="Ej: María Pérez, +56 9 1234 5678"></div>
+      <div class="form-group"><label class="form-label">Contacto de emergencia 2 (opcional)</label><input class="form-input" id="ac-em2" placeholder="Ej: Juan Pérez, +56 9 8765 4321"></div>
+    </div>
+    <div class="form-hint" style="margin-top:-6px;margin-bottom:10px;">Importante: deja un nombre y un teléfono de contacto distinto al tuyo si es posible, para poder ubicar a alguien en caso de emergencia durante la clase.</div>
     <div class="form-hint">Nico podrá ajustar el nivel declarado más adelante según su evaluación. El nuevo hijo queda como Prospecto hasta confirmar inscripción.</div>
+    <label style="display:flex;align-items:flex-start;gap:8px;font-size:13px;cursor:pointer;margin-top:10px;"><input type="checkbox" id="ac-waiver" style="margin-top:3px;"> Entiendo los riesgos que involucra y libero a Champs y sus instructores de toda responsabilidad.</label>
   `;
   const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="confirmAddChild()">Agregar hijo</button>`;
   openModal({title:'Agregar hijo', bodyHtml:body, footHtml:foot});
@@ -3963,15 +4128,18 @@ function openAddChildModal(){
 async function confirmAddChild(){
   const name = document.getElementById('ac-name').value.trim();
   if(!name){ toast('Ingresa el nombre del hijo.'); return; }
+  if(!document.getElementById('ac-waiver').checked){ toast('Debes aceptar la liberación de responsabilidad para inscribir a tu hijo.'); return; }
   const fam = getFamily(state.apoderadoFamilyId);
+  const em1 = document.getElementById('ac-em1').value.trim();
+  const em2 = document.getElementById('ac-em2').value.trim();
   const payload = {
     family_id: state.apoderadoFamilyId, name,
     birth: document.getElementById('ac-birth').value || null,
     level: document.getElementById('ac-level').value,
     experience: document.getElementById('ac-exp').value.trim() || 'Sin información',
     group_id: null, status: 'Prospecto', tariff: null, tariff_note: 'Pendiente de asignar grupo',
-    emergency_contact_1: `${fam.apoderado} / ${fam.whatsapp}`, emergency_contact_2: '—',
-    clinic: 'No declarada', insurance: 'No declarado', waiver: false,
+    emergency_contact_1: em1 || `${fam.apoderado} / ${fam.whatsapp}`, emergency_contact_2: em2 || '—',
+    clinic: 'No declarada', insurance: 'No declarado', waiver: true,
   };
   const { data, error } = await sb.from('students').insert(payload).select().single();
   if(error){ toast('No se pudo guardar: ' + error.message); return; }
@@ -3987,8 +4155,8 @@ function renderReservarApoderado(){
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;">
     <div class="card">
       <div class="card-title">Clase grupal</div>
-      <div class="cell-muted" style="margin:6px 0 14px;">Grupo estable con horario recurrente semanal.</div>
-      <button class="btn btn-primary btn-block" onclick="openApoderadoGroupSearchModal()">Explorar grupos compatibles</button>
+      <div class="cell-muted" style="margin:6px 0 14px;">Elige tu plan (1, 2 o 3 veces por semana) y luego los grupos que más te acomoden.</div>
+      <button class="btn btn-primary btn-block" onclick="openApoderadoPlanModal()">Elegir plan y grupos</button>
     </div>
     <div class="card">
       <div class="card-title">Clase particular</div>
@@ -3998,54 +4166,112 @@ function renderReservarApoderado(){
   </div>`;
 }
 
-function openApoderadoGroupSearchModal(childId){
+/* ---- Reserva de clase grupal en 2 pasos: primero el apoderado elige el
+   PLAN (cuántas veces por semana + traslado), que define el precio mensual
+   según la tabla fija de tarifas; después elige, sobre grupos ya existentes,
+   cuáles horarios le acomodan hasta completar esa frecuencia. El precio no
+   depende de qué grupos elija — depende solo del plan. ---- */
+const PLAN_TRANSFER_TIERS = ['Sin traslado','Semi Traslado','Con traslado'];
+function openApoderadoPlanModal(childId){
   const kids = familyChildren();
   const activeChild = childId ? getStudent(childId) : kids[0];
   if(!activeChild){ toast('No tienes hijos registrados todavía.'); return; }
-  const age = calcAge(activeChild.birth);
-  const compatible = mockData.groups.filter(g=>g.active && g.id!==activeChild.groupId);
   const body = `
-    ${kids.length>1?`<div class="form-group"><label class="form-label">Hijo</label><select class="form-select" onchange="openApoderadoGroupSearchModal(this.value)">${kids.map(k=>`<option value="${k.id}" ${k.id===activeChild.id?'selected':''}>${k.name}</option>`).join('')}</select></div>`:''}
-    ${compatible.map(g=>{
-      const occ = studentsOfGroup(g.id).length;
-      const full = occ>=g.capacity;
-      const ageOk = age>=g.ageMin && age<=g.ageMax;
-      return `<div class="card-flat" style="margin-bottom:10px;">
-        <div style="font-weight:700;font-size:13.5px;">${g.name} ${ageOk?'<span class="badge badge-success" style="margin-left:6px;">Compatible</span>':'<span class="badge badge-warning" style="margin-left:6px;">Fuera de rango de edad</span>'}</div>
-        <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name || 'Sin locación'}</div>
-        <div class="cell-muted">${fmtMoney(g.tariff)} / mes · ${g.transferPlan} · ${occ}/${g.capacity} cupos</div>
-        <button class="btn btn-sm ${full?'btn-secondary':'btn-primary'}" style="margin-top:8px;" ${full?'disabled':''} onclick="apoderadoReserveGroup('${activeChild.id}','${g.id}')">${full?'Sin cupo':'Reservar cupo'}</button>
-      </div>`;
-    }).join('')}
+    ${kids.length>1?`<div class="form-group"><label class="form-label">Hijo</label><select class="form-select" onchange="openApoderadoPlanModal(this.value)">${kids.map(k=>`<option value="${k.id}" ${k.id===activeChild.id?'selected':''}>${k.name}</option>`).join('')}</select></div>`:''}
+    <div class="form-group">
+      <label class="form-label">¿Cuántas veces a la semana?</label>
+      <div class="form-radio-group" id="plan-freq">
+        ${[1,2,3].map(n=>`<button type="button" class="chip-option ${n===1?'selected':''}" data-freq="${n}" onclick="onPlanChoiceChange(this,'plan-freq')">${n}x semana</button>`).join('')}
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Traslado</label>
+      <div class="form-radio-group" id="plan-transfer">
+        ${PLAN_TRANSFER_TIERS.map((t,i)=>`<button type="button" class="chip-option ${i===0?'selected':''}" data-transfer="${t}" onclick="onPlanChoiceChange(this,'plan-transfer')">${t}</button>`).join('')}
+      </div>
+    </div>
+    <div class="form-hint" style="font-size:14px;">Valor mensual del plan: <strong id="plan-price">${fmtMoney(planPriceFor(1,'Sin traslado'))}</strong></div>
   `;
-  openModal({title:'Grupos compatibles', sub:activeChild.name, bodyHtml:body, wide:true});
+  const foot = `<button class="btn btn-secondary" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="goToApoderadoGroupPicker('${activeChild.id}')">Elegir grupos →</button>`;
+  openModal({title:'Elige tu plan', sub:activeChild.name, bodyHtml:body, footHtml:foot});
 }
-async function apoderadoReserveGroup(studentId, groupId){
+function onPlanChoiceChange(btn, groupContainerId){
+  document.querySelectorAll(`#${groupContainerId} .chip-option`).forEach(b=>b.classList.remove('selected'));
+  btn.classList.add('selected');
+  const freq = parseInt(document.querySelector('#plan-freq .chip-option.selected')?.dataset.freq || '1');
+  const transfer = document.querySelector('#plan-transfer .chip-option.selected')?.dataset.transfer || 'Sin traslado';
+  const priceEl = document.getElementById('plan-price');
+  if(priceEl) priceEl.textContent = fmtMoney(planPriceFor(freq, transfer));
+}
+function goToApoderadoGroupPicker(studentId){
+  const freq = parseInt(document.querySelector('#plan-freq .chip-option.selected')?.dataset.freq || '1');
+  const transfer = document.querySelector('#plan-transfer .chip-option.selected')?.dataset.transfer || 'Sin traslado';
+  openApoderadoGroupPickerModal(studentId, freq, transfer);
+}
+function openApoderadoGroupPickerModal(studentId, frequency, transferTier){
   const st = getStudent(studentId);
-  const g = getGroup(groupId);
-  const oldGroupId = st.groupId;
+  const age = calcAge(st.birth);
+  const compatible = mockData.groups.filter(g=>g.active);
+  const price = planPriceFor(frequency, transferTier);
+  const body = `
+    <div class="form-hint" style="margin-bottom:12px;">Plan: <strong>${frequency}x por semana · ${transferTier}</strong> — ${fmtMoney(price)}/mes. Selecciona exactamente ${frequency} grupo(s) que le acomoden a ${st.name}.</div>
+    <div class="form-radio-group" id="gp-groups">
+      ${compatible.map(g=>{
+        const occ = studentsOfGroup(g.id).length;
+        const full = occ>=g.capacity;
+        const ageOk = age>=g.ageMin && age<=g.ageMax;
+        return `<button type="button" class="chip-option" data-group-id="${g.id}" ${full?'disabled':''} onclick="toggleApGroupPick(this,${frequency})" style="display:block;width:100%;text-align:left;margin-bottom:8px;padding:10px 12px;">
+          <div style="font-weight:700;font-size:13.5px;">${g.name} ${ageOk?'':'<span class="badge badge-warning" style="margin-left:6px;">Fuera de rango de edad</span>'} ${full?'<span class="badge badge-neutral" style="margin-left:6px;">Sin cupo</span>':''}</div>
+          <div class="cell-muted">${g.day} ${g.time} · ${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name || 'Sin locación'} · ${occ}/${g.capacity} cupos</div>
+        </button>`;
+      }).join('') || '<div class="cell-muted">No hay grupos activos todavía.</div>'}
+    </div>
+    <div class="form-hint" id="gp-count">0 de ${frequency} grupo(s) seleccionados.</div>
+  `;
+  const foot = `<button class="btn btn-secondary" onclick="openApoderadoPlanModal('${studentId}')">← Volver</button><button class="btn btn-primary" id="gp-submit" disabled onclick="confirmApoderadoPlanReservation('${studentId}',${frequency},'${transferTier}')">Confirmar reserva</button>`;
+  openModal({title:'Elige tus grupos', sub:st.name, bodyHtml:body, footHtml:foot, wide:true});
+}
+function toggleApGroupPick(btn, frequency){
+  const selected = document.querySelectorAll('#gp-groups .chip-option.selected').length;
+  if(!btn.classList.contains('selected') && selected>=frequency){ toast(`Tu plan es de ${frequency}x por semana — ya seleccionaste ${frequency} grupo(s).`); return; }
+  btn.classList.toggle('selected');
+  const count = document.querySelectorAll('#gp-groups .chip-option.selected').length;
+  document.getElementById('gp-count').textContent = `${count} de ${frequency} grupo(s) seleccionados.`;
+  document.getElementById('gp-submit').disabled = count!==frequency;
+}
+async function confirmApoderadoPlanReservation(studentId, frequency, transferTier){
+  const groupIds = [...document.querySelectorAll('#gp-groups .chip-option.selected')].map(b=>b.dataset.groupId);
+  if(groupIds.length!==frequency){ toast(`Selecciona exactamente ${frequency} grupo(s).`); return; }
+  const st = getStudent(studentId);
+  const price = planPriceFor(frequency, transferTier);
   const period = todayISO().slice(0,7);
-  st.groupId = groupId;
-  st.level = g.level;
-  st.tariff = g.tariff;
-  st.tariffNote = 'Tarifa estándar del grupo';
+  try{
+    await replaceStudentGroupsWrite(studentId, groupIds);
+  }catch(e){ toast('Error al reservar el cupo: '+e.message); return; }
+  st.tariff = price;
+  st.tariffNote = `Plan ${frequency}x/semana · ${transferTier}`;
+  st.planFrequency = frequency;
+  st.planTransfer = transferTier;
   if(isRealId(studentId)){
-    const { error: updErr } = await sb.from('students').update({group_id:groupId, level:g.level, tariff:g.tariff, tariff_note:'Tarifa estándar del grupo'}).eq('id', studentId);
-    if(updErr){ toast('Error al reservar el cupo: '+updErr.message); return; }
-    // El historial de cambio de grupo es solo informativo para el admin; si RLS
-    // lo bloquea (los apoderados no tienen permiso de insert ahí) no debe frenar
-    // la reserva, que ya quedó guardada arriba.
-    sb.from('group_change_log').insert({student_id:studentId, from_group_id: isRealId(oldGroupId)?oldGroupId:null, to_group_id:groupId, reason:'Reserva solicitada por el apoderado desde la app'}).select().single()
-      .then(({data})=>{ if(data) mockData.groupChangeLog.push(mapGroupChangeRow(data)); })
-      .catch(()=>{});
-    const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id:st.familyId, student_id:studentId, concept:`Mensualidad — ${g.name}`, period, amount:g.tariff, status:'Pendiente'}).select().single();
+    const { error: updErr } = await sb.from('students').update({tariff:price, tariff_note:st.tariffNote, plan_frequency:frequency, plan_transfer:transferTier}).eq('id', studentId);
+    if(updErr){ toast('Error al guardar el plan: '+updErr.message); return; }
+    for(const gid of groupIds){
+      sb.from('group_change_log').insert({student_id:studentId, from_group_id:null, to_group_id:gid, reason:'Plan reservado por el apoderado desde la app'}).select().single()
+        .then(({data})=>{ if(data) mockData.groupChangeLog.push(mapGroupChangeRow(data)); })
+        .catch(()=>{});
+    }
+    const { data: payRow, error: payErr } = await sb.from('payments').insert({family_id:st.familyId, student_id:studentId, concept:`Plan ${frequency}x/semana — ${transferTier}`, period, amount:price, status:'Pendiente'}).select().single();
     if(!payErr && payRow) mockData.payments.push(mapPaymentRow(payRow));
   } else {
-    mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:oldGroupId, toGroupId:groupId, date:todayISO(), reason:'Reserva solicitada por el apoderado desde la app'});
-    mockData.payments.push({id:'P'+Math.floor(100+Math.random()*800), familyId:st.familyId, studentId, concept:`Mensualidad — ${g.name}`, period, amount:g.tariff, date:null, method:null, status:'Pendiente', receipt:null});
+    groupIds.forEach(gid=>{
+      mockData.groupChangeLog.push({id:'GC-L'+Math.random().toString(36).slice(2,6), studentId, fromGroupId:null, toGroupId:gid, date:todayISO(), reason:'Plan reservado por el apoderado desde la app'});
+    });
+    mockData.payments.push({id:'P'+Math.floor(100+Math.random()*800), familyId:st.familyId, studentId, concept:`Plan ${frequency}x/semana — ${transferTier}`, period, amount:price, date:null, method:null, status:'Pendiente', receipt:null});
   }
+  await activateStudentIfProspecto(studentId);
   closeModal();
-  toast(`¡Reserva confirmada! ${st.name} quedó en ${g.name}. Se generó el cobro de la mensualidad.`);
+  const groupNames = groupIds.map(id=>getGroup(id)?.name).filter(Boolean).join(', ');
+  toast(`¡Reserva confirmada! ${st.name} quedó en ${groupNames}. Se generó el cobro del plan.`);
   renderView(state.view);
 }
 
@@ -4248,29 +4474,51 @@ async function confirmApoderadoParticular(){
     closeModal();
     toast(`Reserva particular confirmada para ${fmtDate(date)}. Cobro pendiente: ${fmtMoney(studentAmount)}.`);
   }
+  for(const sid of studentIds) await activateStudentIfProspecto(sid);
   renderView(state.view);
 }
 
 function renderClasesDisponiblesApoderado(){
   const kids = familyChildren();
   const available = mockData.sessions.filter(s=>s.type==='particular' && s.status==='Disponible' && s.date>=todayISO()).sort((a,b)=>(a.date+a.start).localeCompare(b.date+b.start));
+  const groupsWithSpace = mockData.groups.filter(g=>g.active && studentsOfGroup(g.id).length < g.capacity);
   return `
-  <div class="page-head"><div><h1>Clases disponibles</h1><div class="page-sub">Horarios particulares publicados por Nico — reserva los que te acomoden</div></div></div>
-  <div class="form-group"><label class="form-label">¿Quién participará?</label>
+  <div class="page-head"><div><h1>Clases disponibles</h1><div class="page-sub">Grupos con cupo y horarios particulares publicados por Nico</div></div></div>
+
+  <div class="card-title" style="margin-bottom:10px;">🔵 Grupos con cupo disponible</div>
+  <div style="margin-bottom:20px;">
+    ${groupsWithSpace.length ? groupsWithSpace.map(g=>groupSlotCardHtml(g)).join('') : `<div class="card">${emptyMini('No hay grupos con cupo disponible por ahora')}</div>`}
+  </div>
+
+  <div class="card-title" style="margin-bottom:10px;">🟡 Horarios particulares disponibles</div>
+  <div class="form-group"><label class="form-label">¿Quién participará? (para reservar horarios particulares)</label>
     <div class="form-radio-group" id="cd-students">
       ${kids.map((k,i)=>`<button type="button" class="chip-option ${i===0?'selected':''}" data-student-id="${k.id}" onclick="this.classList.toggle('selected')">${k.name}</button>`).join('') || '<span class="cell-muted">No tienes personas registradas todavía.</span>'}
     </div>
   </div>
   <div style="margin-bottom:14px;">
-    ${available.length ? available.map(s=>availableSlotCardHtml(s)).join('') : `<div class="card">${emptyMini('No hay horarios disponibles por ahora')}</div>`}
+    ${available.length ? available.map(s=>availableSlotCardHtml(s)).join('') : `<div class="card">${emptyMini('No hay horarios particulares disponibles por ahora')}</div>`}
   </div>
   ${available.length ? `<button class="btn btn-primary" onclick="confirmClaimAvailableSlots()">Reservar seleccionadas</button>` : ''}
   `;
 }
+function groupSlotCardHtml(g){
+  const occ = studentsOfGroup(g.id).length;
+  const free = g.capacity - occ;
+  return `<div class="card-flat" style="display:flex;align-items:center;gap:12px;margin-bottom:8px;border-left:3px solid var(--info,#4a9eff);">
+    <span class="badge badge-info" style="flex-shrink:0;">Grupal</span>
+    <div style="flex:1;">
+      <div style="font-weight:700;">${g.name} — ${g.day} ${g.time}</div>
+      <div class="cell-muted" style="font-size:12.5px;">${groupInstructorNames(g)} · ${getLocation(g.locationId)?.name || 'Sin locación'} · ${g.level} · ${free} cupo(s) libre(s)</div>
+    </div>
+    <button class="btn btn-secondary btn-sm" style="white-space:nowrap;" onclick="openApoderadoPlanModal()">Ver planes y reservar</button>
+  </div>`;
+}
 function availableSlotCardHtml(s){
   const loc = getLocation(s.locationId);
   const price = s.studentAmount || particularPriceFor(1);
-  return `<label class="card-flat" style="display:flex;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;">
+  return `<label class="card-flat" style="display:flex;align-items:center;gap:12px;margin-bottom:8px;cursor:pointer;border-left:3px solid var(--warning,#ffb020);">
+    <span class="badge badge-warning" style="flex-shrink:0;">Particular</span>
     <input type="checkbox" class="cd-slot-check" data-session-id="${s.id}" style="width:18px;height:18px;flex-shrink:0;">
     <div style="flex:1;">
       <div style="font-weight:700;">${fmtDateLong(s.date)} · ${s.start}–${s.end}</div>
@@ -4314,6 +4562,7 @@ async function confirmClaimAvailableSlots(){
       mockData.payments.push(payment);
       s.status='Programada'; s.studentIds=studentIds; s.participantsCount=count; s.studentAmount=studentAmount; s.studentPaymentId=payment.id;
     }
+    for(const sid of studentIds) await activateStudentIfProspecto(sid);
     claimed++;
   }
   if(claimed) toast(`${claimed} clase(s) reservada(s). Se generó el cobro pendiente.`);
@@ -4794,8 +5043,9 @@ function buildCommunicationMessages(){
     const st = getStudent(commState.targetId);
     if(st){
       const fam = getFamily(st.familyId);
-      const g = getGroup(st.groupId);
-      msgs.push({name:`${fam.apoderado} (sobre ${st.name})`, msg:`Hola ${fam.apoderado.split(' ')[0]}, te escribimos sobre ${st.name}. ${g ? `Su próxima clase de ${g.name} es el ${g.day} a las ${g.time}.` : 'Actualmente no tiene un grupo grupal asignado.'}`});
+      const stGroups = groupsOfStudent(st.id);
+      const groupsText = stGroups.length===1 ? `Su próxima clase de ${stGroups[0].name} es el ${stGroups[0].day} a las ${stGroups[0].time}.` : stGroups.length>1 ? `Sus próximas clases: ${stGroups.map(g=>`${g.name} (${g.day} ${g.time})`).join(', ')}.` : 'Actualmente no tiene un grupo grupal asignado.';
+      msgs.push({name:`${fam.apoderado} (sobre ${st.name})`, msg:`Hola ${fam.apoderado.split(' ')[0]}, te escribimos sobre ${st.name}. ${groupsText}`});
     }
   } else if(commState.tipo==='grupo'){
     const g = getGroup(commState.targetId);
@@ -4847,7 +5097,7 @@ function exportCSV(filename, headers, rows){
 
 const REPORTS = [
   {id:'alumnos', label:'Alumnos', desc:'Listado completo con nivel, grupo y estado.', fn:()=>exportCSV('alumnos.csv', ['ID','Nombre','Edad','Nivel','Grupo','Estado','Familia'],
-    mockData.students.map(s=>[s.id,s.name,calcAge(s.birth),s.level,getGroup(s.groupId)?.name||'',s.status,getFamily(s.familyId)?.apoderado||'']))},
+    mockData.students.map(s=>[s.id,s.name,calcAge(s.birth),s.level,groupsOfStudent(s.id).map(g=>g.name).join(' + ')||'',s.status,getFamily(s.familyId)?.apoderado||'']))},
   {id:'familias', label:'Familias', desc:'Apoderados con datos de contacto.', fn:()=>exportCSV('familias.csv', ['ID','Apoderado','RUT','Email','WhatsApp','Dirección','N° hijos'],
     mockData.families.map(f=>[f.id,f.apoderado,f.rut,f.email,f.whatsapp,f.address,studentsOfFamily(f.id).length]))},
   {id:'grupos', label:'Grupos', desc:'Grupos con cupo, instructor y tarifa.', fn:()=>exportCSV('grupos.csv', ['ID','Nombre','Nivel','Día','Hora','Instructores','Cupo','Ocupación','Tarifa'],
@@ -5198,6 +5448,10 @@ async function confirmImport(){
       }).select().single();
       if(stuErr) throw stuErr;
       mockData.students.push(mapStudentRow(stuRow));
+      if(row.grupoId){
+        try{ await addStudentToGroupWrite(stuRow.id, row.grupoId); }
+        catch(sgErr){ console.error('No se pudo inscribir en student_groups:', sgErr.message); }
+      }
       studentsCreated++;
     } catch(err){
       console.error('Error importando fila:', err.message);
