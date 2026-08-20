@@ -790,6 +790,29 @@ async function removeStudentFromUpcomingGroupSessions(studentId, groupId){
     s.studentIds = s.studentIds.filter(id=>id!==studentId);
   }
 }
+/* ---- Al editar un grupo (ej. asignarle una locación que antes no tenía, o
+   cambiar el horario/duración) las sesiones que ya se generaron con
+   "Generar sesiones" quedaron con los datos viejos (o vacíos) porque cada
+   sesión los copia una sola vez al crearse. Sin esto, el calendario sigue
+   mostrando "Sin locación" aunque el grupo ya la tenga asignada. Solo se
+   sincronizan sesiones futuras aún Programada (no se tocan las ya
+   Realizada/Suspendida, ni se mueve la fecha si cambia el día). ---- */
+async function syncGroupSessionsAfterEdit(groupId){
+  const g = getGroup(groupId);
+  if(!g) return;
+  const endTime = addMinutesToTime(g.time, g.duration||60);
+  const upcoming = mockData.sessions.filter(s=>s.groupId===groupId && s.status==='Programada' && s.date>=todayISO());
+  for(const s of upcoming){
+    if(isRealId(s.id)){
+      const { error } = await sb.from('sessions').update({
+        location_id: isRealId(g.locationId) ? g.locationId : null,
+        start_time: g.time, end_time: endTime,
+      }).eq('id', s.id);
+      if(error){ console.error('No se pudo sincronizar una sesión ya generada:', error.message); continue; }
+    }
+    s.locationId = g.locationId; s.start = g.time; s.end = endTime; s.duration = g.duration;
+  }
+}
 /* ---- Orden de días de la semana, para que los grupos siempre se listen
    Lunes -> Domingo en vez de en el orden en que fueron creados. ---- */
 const DAY_ORDER = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
@@ -3076,6 +3099,7 @@ async function confirmEditGroup(groupId){
   g.name = payload.name; g.capacity = payload.capacity; g.tariff = payload.tariff;
   g.locationId = payload.location_id; g.active = payload.active; g.instructorIds = instructorIds;
   g.day = payload.day; g.time = payload.start_time; g.duration = payload.duration_minutes;
+  await syncGroupSessionsAfterEdit(groupId);
   closeModal();
   toast('Grupo actualizado.');
   renderView(state.view);
