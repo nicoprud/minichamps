@@ -2983,8 +2983,18 @@ async function confirmAddStudentsToGroup(groupId){
 function openGroupStudentsModal(groupId){
   const g = getGroup(groupId);
   const students = studentsOfGroup(groupId);
-  const body = `<div class="table-wrap"><table><thead><tr><th>Alumno</th><th>Edad</th><th>Estado</th><th>Pago</th></tr></thead><tbody>
-    ${students.map(s=>{ const p=paymentsOfStudent(s.id); const last=p[p.length-1]; return `<tr class="clickable" onclick="closeModal();openStudentModal('${s.id}')"><td><div class="name-cell"><div class="row-avatar">${avatarInner(s)}</div><div class="cell-primary">${s.name}</div></div></td><td>${calcAge(s.birth)} años</td><td>${statusBadge(s.status)}</td><td>${last?paymentBadge(last.status):'—'}</td></tr>`; }).join('') || '<tr><td colspan="4"><div class="cell-muted" style="padding:14px;">Sin alumnos en este grupo.</div></td></tr>'}
+  /* ---- Un apoderado puede ver quiénes son los compañeros de grupo de su
+     hijo/a (nombre/edad/estado), pero no el estado de pago ni la ficha
+     completa (contactos de emergencia, teléfono del apoderado, etc.) de
+     otras familias — eso solo lo ve admin, o el propio dueño de la ficha. ---- */
+  const isAdmin = state.role==='admin';
+  const canOpenFicha = s => isAdmin || (state.role==='apoderado' && s.familyId===state.apoderadoFamilyId);
+  const body = `<div class="table-wrap"><table><thead><tr><th>Alumno</th><th>Edad</th><th>Estado</th>${isAdmin?'<th>Pago</th>':''}</tr></thead><tbody>
+    ${students.map(s=>{
+      const openable = canOpenFicha(s);
+      const p=paymentsOfStudent(s.id); const last=p[p.length-1];
+      return `<tr class="${openable?'clickable':''}" ${openable?`onclick="closeModal();openStudentModal('${s.id}')"`:''}><td><div class="name-cell"><div class="row-avatar">${avatarInner(s)}</div><div class="cell-primary">${s.name}</div></div></td><td>${calcAge(s.birth)} años</td><td>${statusBadge(s.status)}</td>${isAdmin?`<td>${last?paymentBadge(last.status):'—'}</td>`:''}</tr>`;
+    }).join('') || `<tr><td colspan="${isAdmin?4:3}"><div class="cell-muted" style="padding:14px;">Sin alumnos en este grupo.</div></td></tr>`}
   </tbody></table></div>`;
   openModal({title:g.name, sub:`${students.length}/${g.capacity} cupos ocupados`, bodyHtml:body, wide:true});
 }
@@ -4176,7 +4186,8 @@ function renderMisHijos(){
         ${kidGroups.length ? kidGroups.map(g=>`
         <div class="child-info-row"><span>Grupo</span><span>${g.name}</span></div>
         <div class="child-info-row"><span>Horario</span><span>${g.day} ${g.time}</span></div>
-        <div class="child-info-row"><span>Instructor</span><span>${groupInstructorNames(g)}</span></div>`).join('') : `
+        <div class="child-info-row"><span>Instructor</span><span>${groupInstructorNames(g)}</span></div>
+        <div style="margin:6px 0 4px;"><button class="btn btn-ghost btn-sm" onclick="openGroupStudentsModal('${g.id}')">👀 Ver compañeros de grupo</button></div>`).join('') : `
         <div class="child-info-row"><span>Grupo</span><span>Sin grupo</span></div>`}
         <div class="child-info-row"><span>Estado</span><span>${statusBadge(k.status)}</span></div>
         <button class="btn btn-secondary btn-sm btn-block" onclick="openStudentModal('${k.id}')">Ver detalle</button>
