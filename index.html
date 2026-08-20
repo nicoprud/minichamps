@@ -907,6 +907,9 @@ const state = {
   apoderadoHistorialChildId: null,
   instructorId: null,
   calendarView: 'semana',
+  calendarWeekOffset: 0,
+  calendarDayOffset: 0,
+  calendarMonthOffset: 0,
   calendarFilters: { instructor:'todos', location:'todos', group:'todos', type:'todos', status:'todos' },
   studentFilters: { q:'', level:'todos', group:'todos', status:'todos' },
 };
@@ -1787,12 +1790,12 @@ const WEEK_LABELS = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
 /* Semana real (lunes a domingo) que contiene la fecha de hoy — se recalcula
    en cada llamada, así el calendario siempre muestra la semana actual en
    vez de quedar anclado a una semana fija de demostración. */
-function getCurrentWeekDates(){
+function getCurrentWeekDates(offsetWeeks){
   const d = new Date();
   d.setHours(0,0,0,0);
   const dow = d.getDay(); // 0=domingo .. 6=sábado
   const mondayOffset = dow===0 ? -6 : 1-dow;
-  d.setDate(d.getDate()+mondayOffset);
+  d.setDate(d.getDate()+mondayOffset+(offsetWeeks||0)*7);
   const dates = [];
   for(let i=0;i<7;i++){
     dates.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`);
@@ -1853,6 +1856,34 @@ function calendarFiltersBar(){
   </div>`;
 }
 
+function calendarPeriodLabel(){
+  if(state.calendarView==='semana') return fmtWeekRange(getCurrentWeekDates(state.calendarWeekOffset));
+  if(state.calendarView==='dia'){
+    const d = addDaysToDate(todayISO(), state.calendarDayOffset);
+    return fmtDateLong(d);
+  }
+  if(state.calendarView==='mes'){
+    const now = new Date();
+    const d = new Date(now.getFullYear(), now.getMonth()+state.calendarMonthOffset, 1);
+    const label = d.toLocaleDateString('es-CL', {month:'long', year:'numeric'});
+    return label[0].toUpperCase()+label.slice(1);
+  }
+  return 'Todas las sesiones que calcen con los filtros';
+}
+function calendarNavOffsetKey(){
+  return state.calendarView==='semana' ? 'calendarWeekOffset' : state.calendarView==='dia' ? 'calendarDayOffset' : state.calendarView==='mes' ? 'calendarMonthOffset' : null;
+}
+function shiftCalendarPeriod(delta){
+  const key = calendarNavOffsetKey();
+  if(!key) return;
+  state[key] += delta;
+  renderView('calendario');
+}
+function resetCalendarPeriod(){
+  const key = calendarNavOffsetKey();
+  if(key) state[key] = 0;
+  renderView('calendario');
+}
 function renderCalendario(){
   const sessions = getFilteredSessions();
   let body = '';
@@ -1860,21 +1891,27 @@ function renderCalendario(){
   else if(state.calendarView==='lista') body = calendarListView(sessions);
   else if(state.calendarView==='dia') body = calendarDayView(sessions);
   else body = calendarMonthView(sessions);
+  const showNav = state.calendarView!=='lista';
 
   return `
   <div class="page-head">
-    <div><h1>Calendario</h1><div class="page-sub">${fmtWeekRange(getCurrentWeekDates())}</div></div>
+    <div><h1>Calendario</h1><div class="page-sub">${calendarPeriodLabel()}</div></div>
     <div class="view-switch">
       ${['dia','semana','mes','lista'].map(v=>`<button class="${state.calendarView===v?'active':''}" onclick="state.calendarView='${v}';renderView('calendario')">${v[0].toUpperCase()+v.slice(1)}</button>`).join('')}
     </div>
   </div>
+  ${showNav ? `<div style="display:flex;gap:8px;margin-bottom:14px;">
+    <button class="btn btn-secondary btn-sm" onclick="shiftCalendarPeriod(-1)">← Anterior</button>
+    <button class="btn btn-secondary btn-sm" onclick="resetCalendarPeriod()">Hoy</button>
+    <button class="btn btn-secondary btn-sm" onclick="shiftCalendarPeriod(1)">Siguiente →</button>
+  </div>` : ''}
   ${calendarFiltersBar()}
   ${body}
   `;
 }
 
 function calendarWeekView(sessions){
-  const weekDates = getCurrentWeekDates();
+  const weekDates = getCurrentWeekDates(state.calendarWeekOffset);
   const todayStr = todayISO();
   return `<div class="week-grid">
     <div class="week-day-head" style="background:transparent;border-left:none;"></div>
@@ -1906,9 +1943,10 @@ function calendarListView(sessions){
 }
 
 function calendarDayView(sessions){
-  const todayStr = todayISO();
-  const daySessions = sessions.filter(s=>s.date===todayStr).sort((a,b)=>a.start.localeCompare(b.start));
-  return `<div class="table-wrap">${daySessions.map(s=>sessionRowMini(s)).join('') || emptyMini('Sin sesiones hoy para estos filtros')}</div>`;
+  const targetDate = addDaysToDate(todayISO(), state.calendarDayOffset);
+  const daySessions = sessions.filter(s=>s.date===targetDate).sort((a,b)=>a.start.localeCompare(b.start));
+  const emptyMsg = state.calendarDayOffset===0 ? 'Sin sesiones hoy para estos filtros' : 'Sin sesiones ese día para estos filtros';
+  return `<div class="table-wrap">${daySessions.map(s=>sessionRowMini(s)).join('') || emptyMini(emptyMsg)}</div>`;
 }
 
 function calendarMonthView(sessions){
@@ -1916,7 +1954,8 @@ function calendarMonthView(sessions){
   const byDate = {};
   sessions.forEach(s=>{ (byDate[s.date] = byDate[s.date]||[]).push(s); });
   const now = new Date();
-  const year = now.getFullYear(), month = now.getMonth();
+  const shifted = new Date(now.getFullYear(), now.getMonth()+state.calendarMonthOffset, 1);
+  const year = shifted.getFullYear(), month = shifted.getMonth();
   const todayStr = todayISO();
   const daysInMonth = new Date(year, month+1, 0).getDate();
   const firstDow = new Date(year, month, 1).getDay(); // 0=domingo..6=sábado
